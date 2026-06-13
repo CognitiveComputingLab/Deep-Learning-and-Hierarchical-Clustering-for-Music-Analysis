@@ -1,3 +1,6 @@
 [submodule "external/Taking-Form"]
 	path = external/Taking-Form
 	url = https://github.com/MarkGotham/Taking-Form.git
+[submodule "external/ABC"]
+	path = external/ABC
+	url = https://github.com/DCMLab/ABC.git
