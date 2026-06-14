@@ -30,7 +30,7 @@ def load_abc_tsv(tsv_path: str) -> FormNode:
     """
     Parse one ABC harmonies TSV file into a FormNode tree.
     
-    Returns the root node (whole piece). The tree has structure:
+    Returns the root node (whole piece). The tree structure will be:
       ROOT
       ├── Localkey [I]  (m.a-b)
       │   ├── Pedal [V]  (m.x-y)  [optional]

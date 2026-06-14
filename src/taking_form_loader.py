@@ -67,6 +67,23 @@ def _parse_measure_field(value: str) -> Optional[int]:
         return int(match.group(1))
     return None
 
+def _parse_repeat_source(value: str) -> Optional[str]:
+    """
+    If the measure field uses repeat notation like '125-132=1-8' or '65=1',
+    return a human-readable string describing the source measures (e.g. "m.1-8").
+    Returns None if there's no '=' (i.e., this is a normal measure row).
+    
+    Handles whitespace tolerantly: '123-129= 1-7' is treated the same as '123-129=1-7'.
+    """
+    value = str(value).strip()
+    if '=' not in value:
+        return None
+    # Split on '=' and take the right-hand side
+    rhs = value.split('=', 1)[1].strip()
+    if not rhs:
+        return None
+    return f"m.{rhs}"
+
 
 def load_taking_form_csv(csv_path: str) -> FormNode:
     """
@@ -103,6 +120,8 @@ def load_taking_form_csv(csv_path: str) -> FormNode:
         measure = _parse_measure_field(row[0])
         if measure is None:
             continue  # Skip rows where we can't extract a measure number
+        # Check if this row uses repeat notation (e.g., '125-132=1-8')
+        repeat_source = _parse_repeat_source(row[0])
         
         for col_idx in range(2, df.shape[1]):
             cell = str(row[col_idx]).strip()
@@ -110,6 +129,10 @@ def load_taking_form_csv(csv_path: str) -> FormNode:
                 continue
             
             depth = col_idx - 1
+
+            # If this row is a repeat, annotate the label
+            if repeat_source is not None:
+                cell = f"{cell} [repeat of {repeat_source}]"
             
             # Close previously-open node at this depth (and deeper)
             for d in range(depth, len(open_nodes)):
