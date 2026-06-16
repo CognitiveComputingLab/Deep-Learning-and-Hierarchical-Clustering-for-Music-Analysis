@@ -4,3 +4,6 @@
 [submodule "external/ABC"]
 	path = external/ABC
 	url = https://github.com/DCMLab/ABC.git
+[submodule "external/algomus-data"]
+	path = external/algomus-data
+	url = https://gitlab.com/algomus.fr/algomus-data.git
