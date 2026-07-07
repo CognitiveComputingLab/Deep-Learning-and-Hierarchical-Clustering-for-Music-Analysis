@@ -1,0 +1,12 @@
+﻿
+# Python
+__pycache__/
+*.pyc
+
+# External clones (not part of this project)
+external/pitchscapes-repo/
+
+# Generated outputs (regenerable from scripts)
+*.mid
+*.midi
+*.png

@@ -1,13 +1,16 @@
 """
-Cross-dataset evaluation: compare tree distances within and across datasets.
+Cross-dataset evaluation: compare tree distances within and across THREE datasets.
 
-Loads:
-  - Taking Form: Beethoven piano sonata movements (CSV → tree)
-  - ABC:         Beethoven string quartet movements (TSV → tree)
+Datasets:
+  - Taking Form: Beethoven piano sonata movements (Gotham & Ireland 2019)
+  - ABC:         Beethoven string quartet movements (Neuwirth et al. 2018)
+  - Fugue:       Bach WTC I fugues (Giraud et al. 2015)
 
-Computes:
-  - Within-dataset baseline (Taking Form pairwise, ABC pairwise)
-  - Cross-dataset distance (Taking Form vs ABC)
+Each loader produces FormNode trees with a unified data structure, but
+semantically the labels and depths differ. This script quantifies
+similarity *within* each dataset (the meaningful baseline) and *across*
+datasets (which is expected to be large, since label vocabularies are
+disjoint by design).
 """
 import os
 import sys
@@ -18,10 +21,10 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from taking_form_loader import load_taking_form_csv, FormNode
 from abc_loader import load_abc_tsv
+from fugue_loader import load_fugue_dez
 
 
 def form_node_to_zss(node: FormNode) -> Node:
-    """Convert FormNode tree to zss.Node tree."""
     zss_node = Node(node.label)
     for child in node.children:
         zss_node.addkid(form_node_to_zss(child))
@@ -33,7 +36,6 @@ def tree_size_form(node: FormNode) -> int:
 
 
 def normalized_ted(tree1: FormNode, tree2: FormNode):
-    """Compute normalized TED between two FormNode trees."""
     zss1 = form_node_to_zss(tree1)
     zss2 = form_node_to_zss(tree2)
     ted = simple_distance(zss1, zss2)
@@ -47,91 +49,87 @@ def normalized_ted(tree1: FormNode, tree2: FormNode):
     }
 
 
+def average_pairwise(trees_dict):
+    """Compute average normalized TED across all unique pairs."""
+    names = list(trees_dict.keys())
+    distances = []
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            r = normalized_ted(trees_dict[names[i]], trees_dict[names[j]])
+            distances.append(r['normalized'])
+    return sum(distances) / len(distances) if distances else 0.0
+
+
+def average_cross(trees_a, trees_b):
+    """Compute average normalized TED across all pairs from two sets."""
+    distances = []
+    for ta in trees_a.values():
+        for tb in trees_b.values():
+            r = normalized_ted(ta, tb)
+            distances.append(r['normalized'])
+    return sum(distances) / len(distances) if distances else 0.0
+
+
 def main():
     REPO_ROOT = os.path.dirname(SCRIPT_DIR)
     
-    # === Load 3 movements from each dataset ===
     BEETHOVEN_DIR = os.path.join(REPO_ROOT, "external/Taking-Form/corpus/Beethoven_Sonatas")
     ABC_DIR = os.path.join(REPO_ROOT, "external/ABC/harmonies")
+    FUGUE_DIR = os.path.join(REPO_ROOT, "external/algomus-data/fugues/bach-wtc-i")
     
-    tf_files = sorted(f for f in os.listdir(BEETHOVEN_DIR) if f.endswith('.csv'))[:3]
-    abc_files = sorted(f for f in os.listdir(ABC_DIR) if f.endswith('.harmonies.tsv'))[:3]
+    N = 5  # number of movements per dataset to use
+    
+    # === Load N movements from each dataset ===
+    tf_files = sorted(f for f in os.listdir(BEETHOVEN_DIR) if f.endswith('.csv'))[:N]
+    abc_files = sorted(f for f in os.listdir(ABC_DIR) if f.endswith('.harmonies.tsv'))[:N]
+    fugue_files = sorted(f for f in os.listdir(FUGUE_DIR) if f.endswith('-ref.dez'))[:N]
     
     print("="*60)
-    print("Loading Taking Form movements (Beethoven piano sonatas)")
+    print(f"Loading {N} movements from each dataset")
     print("="*60)
+    
     tf_trees = {}
+    print("\nTaking Form (Beethoven piano sonatas):")
     for f in tf_files:
         tree = load_taking_form_csv(os.path.join(BEETHOVEN_DIR, f))
         tf_trees[f] = tree
-        print(f"  {f}: {tree.size()} nodes")
+        print(f"  {f}: {tree_size_form(tree)} nodes")
     
-    print()
-    print("="*60)
-    print("Loading ABC movements (Beethoven string quartets)")
-    print("="*60)
     abc_trees = {}
+    print("\nABC (Beethoven string quartets):")
     for f in abc_files:
         tree = load_abc_tsv(os.path.join(ABC_DIR, f))
         abc_trees[f] = tree
-        print(f"  {f}: {tree.size()} nodes")
+        print(f"  {f}: {tree_size_form(tree)} nodes")
     
-    # === Within Taking Form ===
+    fugue_trees = {}
+    print("\nFugue (Bach WTC I):")
+    for f in fugue_files:
+        tree = load_fugue_dez(os.path.join(FUGUE_DIR, f))
+        fugue_trees[f] = tree
+        print(f"  {f}: {tree_size_form(tree)} nodes")
+    
+    # === Compute averages ===
     print()
     print("="*60)
-    print("Within Taking Form (pairwise)")
+    print("Within-dataset baselines (avg normalized TED)")
     print("="*60)
-    tf_names = list(tf_trees.keys())
-    within_tf = []
-    for i in range(len(tf_names)):
-        for j in range(i + 1, len(tf_names)):
-            r = normalized_ted(tf_trees[tf_names[i]], tf_trees[tf_names[j]])
-            within_tf.append(r['normalized'])
-            print(f"  {tf_names[i][:25]} vs {tf_names[j][:25]}: "
-                  f"TED={r['raw_ted']:.0f} norm={r['normalized']:.3f}")
-    
-    # === Within ABC ===
-    print()
-    print("="*60)
-    print("Within ABC (pairwise)")
-    print("="*60)
-    abc_names = list(abc_trees.keys())
-    within_abc = []
-    for i in range(len(abc_names)):
-        for j in range(i + 1, len(abc_names)):
-            r = normalized_ted(abc_trees[abc_names[i]], abc_trees[abc_names[j]])
-            within_abc.append(r['normalized'])
-            print(f"  {abc_names[i][:25]} vs {abc_names[j][:25]}: "
-                  f"TED={r['raw_ted']:.0f} norm={r['normalized']:.3f}")
-    
-    # === Cross-dataset ===
-    print()
-    print("="*60)
-    print("Cross-dataset (Taking Form vs ABC)")
-    print("="*60)
-    cross = []
-    for tf_name in tf_names:
-        for abc_name in abc_names:
-            r = normalized_ted(tf_trees[tf_name], abc_trees[abc_name])
-            cross.append(r['normalized'])
-            print(f"  {tf_name[:25]} vs {abc_name[:25]}: "
-                  f"TED={r['raw_ted']:.0f} norm={r['normalized']:.3f}")
-    
-    # === Summary ===
-    print()
-    print("="*60)
-    print("Summary")
-    print("="*60)
-    if within_tf:
-        print(f"  Within Taking Form (avg norm): {sum(within_tf)/len(within_tf):.3f}")
-    if within_abc:
-        print(f"  Within ABC (avg norm):         {sum(within_abc)/len(within_abc):.3f}")
-    if cross:
-        print(f"  Cross-dataset (avg norm):      {sum(cross)/len(cross):.3f}")
+    print(f"  Taking Form:  {average_pairwise(tf_trees):.3f}")
+    print(f"  ABC:          {average_pairwise(abc_trees):.3f}")
+    print(f"  Fugue:        {average_pairwise(fugue_trees):.3f}")
     
     print()
-    print("If cross-dataset distance is in a similar range as within-dataset,")
-    print("the unified format produces comparable measurements across datasets.")
+    print("="*60)
+    print("Cross-dataset averages")
+    print("="*60)
+    print(f"  Taking Form vs ABC:    {average_cross(tf_trees, abc_trees):.3f}")
+    print(f"  Taking Form vs Fugue:  {average_cross(tf_trees, fugue_trees):.3f}")
+    print(f"  ABC vs Fugue:          {average_cross(abc_trees, fugue_trees):.3f}")
+    
+    print()
+    print("Note: Within-dataset distances are the meaningful baseline for")
+    print("model evaluation. Cross-dataset distances reflect disjoint label")
+    print("vocabularies and are expected to be larger.")
 
 
 if __name__ == "__main__":
