@@ -1,10 +1,4 @@
-"""Evaluate greedy trees against DCML localkey ground truth on Op. 95 mvt.1.
-
-Metrics:
-  1. Raw TED       – full greedy tree vs DCML flat tree (time-bucketed labels)
-  2. Pruned TED    – greedy pruned to match GT leaf count
-  3. Boundary F1   – top-k greedy split points vs DCML localkey changes
-"""
+"""Evaluate greedy trees against DCML localkey ground truth on Op. 95 mvt.1."""
 import sys
 sys.path.insert(0, 'src')
 
@@ -19,7 +13,8 @@ from greedy_clustering import (
 
 TSV_NOTES = r"external\ABC\notes\n11op95_01.notes.tsv"
 TSV_HARM  = r"external\ABC\harmonies\n11op95_01.harmonies.tsv"
-TOL_QB = 24.0   # boundary F1 tolerance (24 qb ≈ 6 measures in 4/4)
+TOL_QB = 24.0
+MAX_DEPTH = 4
 
 # ---------- 补充两个距离函数 ----------
 _FIFTHS_ORDER = [0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5]
@@ -79,14 +74,9 @@ def flat_tree_from_segments(segs):
     root = ClusterNode(0.0, segs[-1][1], None, children=children)
     return root
 
-# ---------- 时间桶标签（关键改动） ----------
+# ---------- 时间桶标签 ----------
 
 def label_tree_by_time(node, total, n_center_bins=10, n_width_bins=5):
-    """
-    Label each node by its (center, width) bucketed to grids.
-    Two nodes get the same label iff they are in the same time-region and scale.
-    This makes TED reflect temporal misalignment, not just structural difference.
-    """
     center = (node.start + node.end) / 2.0
     width  = node.end - node.start
     c_bin = min(n_center_bins - 1, int(n_center_bins * center / total))
@@ -98,14 +88,9 @@ def label_tree_by_time(node, total, n_center_bins=10, n_width_bins=5):
 
 # ---------- zss 适配 ----------
 
-def _label(n):
-    return getattr(n, 'label', 'X')
-
-def _children(n):
-    return n.children
-
-def _label_dist(a, b):
-    return 0 if a == b else 1
+def _label(n): return getattr(n, 'label', 'X')
+def _children(n): return n.children
+def _label_dist(a, b): return 0 if a == b else 1
 
 def ted(t1, t2):
     return zss.simple_distance(t1, t2, _children, _label, _label_dist)
@@ -139,6 +124,7 @@ def find_prune_depth_matching(root, target_leaves):
 # ---------- Boundary F1 ----------
 
 def collect_top_splits(node, max_depth):
+    """Return all internal-node split points within max_depth (as sorted list)."""
     splits = set()
     def walk(n, d):
         if d >= max_depth or not n.children:
@@ -148,9 +134,9 @@ def collect_top_splits(node, max_depth):
         for c in n.children:
             walk(c, d+1)
     walk(node, 0)
-    return splits
+    return sorted(splits)
 
-def boundary_f1(pred, gt, tol_qb=8.0):
+def boundary_f1(pred, gt, tol_qb=24.0):
     matched_gt = set()
     tp = 0
     for p in pred:
@@ -185,13 +171,14 @@ if __name__ == '__main__':
     print(f"Target leaves (K): {K}")
     print(f"GT boundaries: {gt_boundaries}")
     print(f"Boundary tolerance: {TOL_QB} qb ≈ {TOL_QB/4:.1f} measures")
+    print(f"Splits collected up to depth: {MAX_DEPTH}")
     print()
 
     pc_mat, bounds = load_pc_bins(TSV_NOTES, bin_size_qb=8.0)
     print(f"Greedy leaves (bin_size=8 qb): {len(pc_mat)}")
     print()
 
-    header = f"{'distance':12s} {'raw TED':>10s} {'pruned TED':>12s} {'prec':>6s} {'rec':>6s} {'F1':>6s}"
+    header = f"{'distance':12s} {'raw TED':>10s} {'pruned TED':>12s} {'prec':>6s} {'rec':>6s} {'F1':>6s}   splits"
     print(header)
     print("-" * len(header))
 
@@ -206,9 +193,12 @@ if __name__ == '__main__':
         pruned_lab = label_tree_by_time(pruned_root, total)
         pruned_ted = ted(pruned_lab, gt_tree)
 
-        splits = sorted(collect_top_splits(root, max_depth=4))
-        pred_bounds = splits[:K-1] if len(splits) >= K-1 else splits
+        # 取深度 MAX_DEPTH 以内所有内部切分点，不截断
+        pred_bounds = collect_top_splits(root, max_depth=MAX_DEPTH)
         prec, rec, f1 = boundary_f1(pred_bounds, gt_boundaries, tol_qb=TOL_QB)
 
+        # splits 太多就只显示接近 GT 的
+        splits_str = str(pred_bounds)
+
         print(f"{name:12s} {raw_ted:>10.1f} {pruned_ted:>12.1f} "
-              f"{prec:>6.2f} {rec:>6.2f} {f1:>6.2f}")
+              f"{prec:>6.2f} {rec:>6.2f} {f1:>6.2f}   {splits_str}")
