@@ -5,30 +5,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pitchscapes.reader as rd
 import pitchscapes.plotting as pt
-from greedy_clustering import load_pc_bins, greedy_cluster, _norm
+from greedy_clustering import load_pc_bins, greedy_cluster, distance_functions
 
 MIDI = r"n11op95_01.mid"
 TSV  = r"external\ABC\notes\n11op95_01.notes.tsv"
 
 # ---------- Weighted chromagram distance（音级稳定性加权欧氏） ----------
-_STAB_WEIGHTS = np.array(
-    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
-)
-_STAB_WEIGHTS = _STAB_WEIGHTS / _STAB_WEIGHTS.sum()
-
-def d_weighted(a, b):
-    a, b = _norm(a), _norm(b)
-    return np.sqrt(np.sum(_STAB_WEIGHTS * (a - b) ** 2))
-
 # ---------- 载入数据 + 聚类 ----------
 pc_mat, bounds = load_pc_bins(TSV, bin_size_qb=8.0)
+distances, estimated_key = distance_functions(pc_mat.sum(axis=0))
+print(f'Estimated global key: {estimated_key}')
 print(f"叶子数: {len(pc_mat)}")
 
 scape = rd.get_pitch_scape(MIDI)
 fig, ax = plt.subplots(figsize=(14, 8))
 pt.key_scape_plot(scape=scape, n_samples=200, ax=ax)
 
-root = greedy_cluster(pc_mat, bounds, d_weighted)
+root = greedy_cluster(pc_mat, bounds, distances['tonic_weighted'])
 total = root.end
 
 # ---------- 收集顶部节点 ----------
@@ -63,6 +56,6 @@ for center, width, depth in pts:
     ax.plot(x, y, 'o', color='black', markersize=5,
             markeredgecolor='white', markeredgewidth=0.8, zorder=10)
 
-plt.title("Op. 95 mvt.1 — greedy tree top 8 levels (weighted chromagram)")
+plt.title('Op. 95 mvt.1 — tonic-relative weighted distance')
 plt.savefig("op95_greedytree_weighted.png", dpi=140, bbox_inches='tight')
 plt.show()

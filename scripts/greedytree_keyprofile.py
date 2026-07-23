@@ -4,7 +4,7 @@ sys.path.insert(0, 'src')
 import matplotlib.pyplot as plt
 import pitchscapes.reader as rd
 import pitchscapes.plotting as pt
-from greedy_clustering import load_pc_bins, greedy_cluster, DISTANCES
+from greedy_clustering import load_pc_bins, greedy_cluster, d_key_profile
 
 MIDI = r"n11op95_01.mid"
 TSV = r"external\ABC\notes\n11op95_01.notes.tsv"
@@ -18,7 +18,7 @@ scape = rd.get_pitch_scape(MIDI)
 fig, ax = plt.subplots(figsize=(14, 8))
 pt.key_scape_plot(scape=scape, n_samples=200, ax=ax)
 
-root = greedy_cluster(pc_mat, bounds, DISTANCES['keyprofile'])
+root = greedy_cluster(pc_mat, bounds, d_key_profile)
 total = root.end
 
 # 只收集顶部 6 层节点

@@ -5,24 +5,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pitchscapes.reader as rd
 import pitchscapes.plotting as pt
-from greedy_clustering import load_pc_bins, greedy_cluster, _norm
+from greedy_clustering import load_pc_bins, greedy_cluster, d_circle_of_fifths
 
 MIDI = r"n11op95_01.mid"
 TSV  = r"external\ABC\notes\n11op95_01.notes.tsv"
 
 # ---------- Tonnetz 距离（五度圈几何嵌入） ----------
-_FIFTHS_ORDER = [0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5]
-_pc_to_fifth = {pc: i for i, pc in enumerate(_FIFTHS_ORDER)}
-_ANGLES = np.array([2 * np.pi * _pc_to_fifth[pc] / 12 for pc in range(12)])
-
-def _tonnetz_embed(v):
-    v = _norm(v)
-    return np.array([np.sum(v * np.cos(_ANGLES)),
-                     np.sum(v * np.sin(_ANGLES))])
-
-def d_tonnetz(a, b):
-    return np.linalg.norm(_tonnetz_embed(a) - _tonnetz_embed(b))
-
 # ---------- 载入数据 + 聚类 ----------
 pc_mat, bounds = load_pc_bins(TSV, bin_size_qb=8.0)
 print(f"叶子数: {len(pc_mat)}")
@@ -31,7 +19,7 @@ scape = rd.get_pitch_scape(MIDI)
 fig, ax = plt.subplots(figsize=(14, 8))
 pt.key_scape_plot(scape=scape, n_samples=200, ax=ax)
 
-root = greedy_cluster(pc_mat, bounds, d_tonnetz)
+root = greedy_cluster(pc_mat, bounds, d_circle_of_fifths)
 total = root.end
 
 # ---------- 收集顶部节点 ----------
@@ -66,6 +54,6 @@ for center, width, depth in pts:
     ax.plot(x, y, 'o', color='black', markersize=5,
             markeredgecolor='white', markeredgewidth=0.8, zorder=10)
 
-plt.title("Op. 95 mvt.1 — greedy tree top 8 levels (tonnetz distance)")
+plt.title('Op. 95 mvt.1 — circle-of-fifths embedding distance')
 plt.savefig("op95_greedytree_tonnetz.png", dpi=140, bbox_inches='tight')
 plt.show()

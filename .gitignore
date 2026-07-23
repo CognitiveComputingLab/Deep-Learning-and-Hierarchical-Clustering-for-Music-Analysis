@@ -10,3 +10,4 @@ external/pitchscapes-repo/
 *.mid
 *.midi
 *.png
+results/
