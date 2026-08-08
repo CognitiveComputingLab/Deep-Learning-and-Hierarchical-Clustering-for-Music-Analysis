@@ -1,5 +1,29 @@
 # Greedy baseline evaluation notes
 
+## Intermediate DP scope
+
+The new clustering DP enumerates every possible split of every contiguous
+interval and therefore returns the exact minimum-cost ordered binary tree under
+the stated additive child-distance objective. The main experiment uses no
+length weighting and no balance penalty. Optional settings are objective
+ablations and must be named as such.
+
+An objective reduction does not imply better DCML boundary recovery. If DP
+lowers its objective while Boundary F1 stays unchanged or falls, report this as
+evidence that the objective and annotation criterion are not aligned.
+
+The term dynamic programming now occurs in two separate places:
+
+- clustering DP constructs the globally objective-optimal tree;
+- boundary-alignment DP only computes one-to-one evaluation matches and never
+  changes a predicted tree.
+
+Parametric training is blocked by quartet: 10 works train, 3 validate, and 3
+remain held out. Mixture scales are estimated from training examples only;
+mixture weights are selected on training-work F1. Validation reports mixture
+generalisation and chooses diagonal-Mahalanobis checkpoints. The test split
+must not be inspected until model selection is complete.
+
 ## Current interpretation
 
 DCML `localkey` changes provide boundary annotations only. The previous Op.95 analysis compared a binary predicted tree with a one-level tree induced from six local-key segments. Its TED values therefore reflected node-count and depth mismatch as well as temporal structure; they are not evidence of agreement with an expert hierarchy.
@@ -32,3 +56,67 @@ Earlier figures at tolerance 24 qb and depth 4 are exploratory and should not su
 - Treat tolerance/depth precision-recall points as operating points, not confidence-threshold curves.
 - Do not infer that a pruned tree represents the same semantic depth as the DCML segmentation.
 - Do not generalise a single-piece observation to greedy clustering or musical structure overall.
+
+## Accuracy-oriented ordered-affinity objective
+
+The legacy additive child-distance objective remains available for exact
+reproduction, but it can reward comb-shaped trees and is not the recommended
+accuracy-oriented comparison. `scripts/evaluate_optimized_stage.py` uses the
+same non-negative leaf affinity for both searches:
+
+- greedy is temporally constrained bottom-up average linkage;
+- DP exactly maximises ordered similarity revenue over all contiguous binary
+  trees with the fixed leaves.
+
+Tree boundaries are ranked by LCA temporal span. Equal-budget results are the
+main fair tree comparison; fixed depth is retained as a compatibility result,
+and GT-count (`oracle`) budgets must remain labelled diagnostic. Hyperparameter
+selection is leave-one-quartet-out and one common configuration is used for
+both searches, so the comparison isolates the search procedure.
+
+On the 70-movement, 16-work key-profile scan at 8 qb and 8-qb tolerance,
+all movements completed. The final out-of-fold work-level results were Greedy
+F1 0.4402 and DP F1 0.4604; the paired work-level DP-minus-Greedy permutation
+p-value was 0.0323. These values are reproducible experimental
+outputs, not a promise for other datasets or evidence of expert hierarchical
+agreement.
+
+## Boundary-aware objective
+
+The next experiment addresses the remaining target mismatch directly. For
+every internal bin boundary it computes local left/right contrast at context
+sizes 1, 2, and 4 with Euclidean, circle-of-fifths, and key-profile
+representations. The feature is cross-context dissimilarity minus average
+within-context dispersion. Feature median/MAD scales are fitted on training
+works only.
+
+Two scorers must be reported:
+
+- equal-weight unsupervised contrast;
+- a non-negative logistic scorer trained on work-balanced DCML boundary and
+  deterministic hard-negative examples.
+
+Annotations never enter held-out tree construction. The DP maximises
+normalized affinity revenue plus contrast weighted by normalized LCA leaf
+span, minus a normalized squared child-size imbalance penalty. The span
+coupling is essential because an unweighted contrast sum is identical for
+every complete ordered binary tree. The balance term prevents the positive
+contrast reward or aggregate-distance geometry from being maximized by a comb
+tree. Greedy remains adjacent and bottom-up, merging pairs with high affinity,
+weak intervening contrast, and comparable sizes.
+
+Primary boundaries use a threshold selected in inner grouped validation.
+Fixed-budget results are reported in parallel using the same budget for both
+searches; GT-count budgets remain oracle diagnostics. Lambda, threshold, and
+budget, together with balance beta, are selected without the outer quartet,
+and DP must never score below Greedy on the shared objective.
+
+Run:
+
+    python scripts\evaluate_boundary_aware_stage.py --quick
+    python scripts\evaluate_boundary_aware_stage.py
+
+If inner validation selects lambda zero, report that honestly: it means local
+contrast helped boundary ranking but did not justify changing the tree under
+that fold. If objective gains do not improve held-out Boundary F1, the correct
+interpretation remains objective/annotation mismatch rather than DP failure.

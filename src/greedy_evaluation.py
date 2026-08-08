@@ -78,6 +78,119 @@ def collect_k_splits(root,budget):
         splits.extend(child.end for child in node.children[:-1])
     return sorted(set(splits))[:budget]
 
+def boundary_prominence(root):
+    '''Return every tree boundary ranked by its LCA temporal span.
+
+    A complete binary tree eventually contains every leaf boundary, so merely
+    collecting all splits is uninformative. The LCA span is a depth-independent
+    measure that permits equal-budget comparisons across different tree shapes.
+    '''
+    rows=[]
+    def walk(node):
+        children=list(getattr(node,'children',[]) or [])
+        if not children: return 1
+        if len(children)!=2:
+            raise ValueError('boundary prominence requires a binary tree')
+        left_leaves=walk(children[0]); right_leaves=walk(children[1])
+        rows.append({'boundary_qb':float(children[0].end),
+                     'lca_span_qb':float(node.end-node.start),
+                     'lca_leaf_count':left_leaves+right_leaves,
+                     'child_mean_affinity':float(getattr(node,'child_mean_affinity',np.nan)),
+                     'merge_order':int(getattr(node,'merge_order',-1))})
+        return left_leaves+right_leaves
+    walk(root)
+    return sorted(rows,key=lambda row:(-row['lca_span_qb'],-row['lca_leaf_count'],
+        row['child_mean_affinity'] if np.isfinite(row['child_mean_affinity']) else np.inf,
+        -row['merge_order'],row['boundary_qb']))
+
+def collect_prominent_splits(root,budget):
+    '''Select an equal number of the tree's most structurally prominent splits.'''
+    budget=max(0,int(budget))
+    return sorted(row['boundary_qb'] for row in boundary_prominence(root)[:budget])
+
+def boundary_salience(root,contrast=None):
+    '''Return calibrated boundary scores coupled to normalized LCA leaf span.
+
+    Contrast follows leaf order and has one entry per candidate boundary.
+    Passing None produces the structure-only baseline, for which every local
+    contrast equals one and salience is solely normalized LCA span.
+    '''
+    n=count_leaves(root)
+    values=np.ones(max(0,n-1),dtype=float) if contrast is None else np.asarray(contrast,dtype=float)
+    if values.shape!=(max(0,n-1),) or not np.all(np.isfinite(values)):
+        raise ValueError('contrast must contain one finite value per leaf boundary')
+    if np.any(values<0) or np.any(values>1):
+        raise ValueError('contrast values must lie in [0,1]')
+    rows=[]; cursor=[0]
+    def walk(node):
+        children=list(getattr(node,'children',[]) or [])
+        if not children:
+            index=cursor[0]; cursor[0]+=1
+            return index,index+1
+        if len(children)!=2:
+            raise ValueError('boundary salience requires a binary tree')
+        start,split=walk(children[0]); right_start,end=walk(children[1])
+        if split!=right_start: raise ValueError('tree leaves are not temporally ordered')
+        span=end-start
+        span_weight=float(np.log(span)/np.log(n)) if n>1 and span>=2 else 0.0
+        local=float(values[split-1])
+        rows.append({'boundary_qb':float(children[0].end),'boundary_index':split,
+                     'lca_leaf_count':span,'lca_span_qb':float(node.end-node.start),
+                     'span_weight':span_weight,'boundary_contrast':local,
+                     'salience':span_weight*local})
+        return start,end
+    walk(root)
+    return sorted(rows,key=lambda row:(-row['salience'],-row['lca_leaf_count'],
+                                       row['boundary_qb'],row['boundary_index']))
+
+def collect_salient_splits(root,contrast=None,*,threshold=None,budget=None):
+    '''Select variable-count threshold boundaries or an equal fixed budget.'''
+    if (threshold is None)==(budget is None):
+        raise ValueError('specify exactly one of threshold or budget')
+    rows=boundary_salience(root,contrast)
+    if threshold is not None:
+        threshold=float(threshold)
+        if not 0<=threshold<=1: raise ValueError('threshold must lie in [0,1]')
+        selected=[row for row in rows if row['salience']>=threshold]
+    else:
+        selected=rows[:max(0,int(budget))]
+    return sorted(row['boundary_qb'] for row in selected)
+
+def tree_shape_diagnostics(root):
+    '''Quantify imbalance so objective gains are not confused with comb trees.'''
+    leaf_depths=[]; singleton_children=0; internal_nodes=0; colless=0
+    def walk(node,depth=0):
+        nonlocal singleton_children,internal_nodes,colless
+        children=list(getattr(node,'children',[]) or [])
+        if not children:
+            leaf_depths.append(depth); return 1
+        if len(children)!=2: raise ValueError('tree shape diagnostics require a binary tree')
+        internal_nodes+=1
+        left=walk(children[0],depth+1); right=walk(children[1],depth+1)
+        colless+=abs(left-right)
+        singleton_children+=int(left==1)+int(right==1)
+        return left+right
+    leaves=walk(root)
+    root_children=list(getattr(root,'children',[]) or [])
+    if root_children:
+        def count(node):
+            children=list(getattr(node,'children',[]) or [])
+            return 1 if not children else sum(count(child) for child in children)
+        root_left=count(root_children[0]); root_right=count(root_children[1])
+        root_ratio=min(root_left,root_right)/max(root_left,root_right)
+    else:
+        root_left,root_right,root_ratio=1,0,1.0
+    maximum=max(leaf_depths) if leaf_depths else 0
+    return {'leaf_count':leaves,'max_depth':maximum,
+            'normalized_max_depth':maximum/max(1,leaves-1),
+            'sackin_index':sum(leaf_depths),
+            'normalized_sackin_index':sum(leaf_depths)/max(1,leaves*max(1,leaves-1)),
+            'colless_index':colless,
+            'normalized_colless_index':colless/max(1,(leaves-1)*(leaves-2)/2),
+            'singleton_child_ratio':singleton_children/max(1,2*internal_nodes),
+            'root_left_leaves':root_left,'root_right_leaves':root_right,
+            'root_split_ratio':root_ratio}
+
 def boundary_scores(predicted,reference,tolerance):
     '''Order-preserving matching: maximise TP, then minimise total timing error.'''
     predicted=sorted(set(map(float,predicted))); reference=sorted(map(float,reference))

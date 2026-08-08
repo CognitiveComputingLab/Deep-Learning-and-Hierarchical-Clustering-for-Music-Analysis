@@ -1,6 +1,6 @@
 # Deep Learning and Hierarchical Clustering for Music Analysis
 
-This repository evaluates temporally contiguous greedy hierarchical clustering on music data. The current baseline stage compares hand-crafted pitch-class distances before dynamic programming or learned distances are introduced.
+This repository evaluates temporally contiguous hierarchical clustering on music data. It contains the completed greedy baseline plus an intermediate stage that compares greedy merging with exact interval dynamic programming and trains simple parametric distances.
 
 ## Research questions
 
@@ -31,6 +31,137 @@ python scripts\eval_greedy.py --piece n11op95_01 --quick
 python -m pytest -q
 ```
 
+Intermediate-stage runs:
+
+```powershell
+python scripts\evaluate_dp_stage.py
+python scripts\evaluate_dp_stage.py --quick
+python scripts\train_parametric_distance.py --model both
+python scripts\train_parametric_distance.py --quick --model both
+```
+
+Accuracy-oriented intermediate evaluation (recommended):
+
+```powershell
+python scripts\evaluate_optimized_stage.py
+python scripts\evaluate_optimized_stage.py --quick
+```
+
+This keeps the required adjacent bottom-up greedy algorithm and compares it
+with an exact ordered DP under one shared pairwise-affinity objective. The
+objective is the similarity-revenue dual of Dasgupta hierarchical clustering
+cost, restricted to contiguous binary trees. Affinities are RBF-calibrated
+from the existing interpretable distance representations; no DCML annotation
+is read until after each tree has been constructed.
+
+The optimized evaluation ranks a tree boundary by the temporal span of its
+lowest common ancestor. This supports equal prediction-budget comparisons and
+avoids giving balanced and comb-shaped trees different boundary counts merely
+because they are cut at the same depth. Fixed-depth results remain available
+for comparison with the earlier experiment. Method, context radius, and fixed
+boundary budget are selected with leave-one-work-out evaluation at the quartet
+level, using the same selected configuration for greedy and DP.
+
+The corresponding outputs are written to `results/optimized_stage`:
+
+- `loowcv_summary.csv`: leakage-free work-level Greedy/DP Boundary F1;
+- `loowcv_selections.csv`: training-only choice for every held-out work;
+- `prominence_boundary_per_piece.csv`: equal-budget and oracle-budget results;
+- `depth_boundary_per_piece.csv`: legacy-compatible depth results;
+- `objective_comparison.csv`: exact DP minus greedy revenue gap;
+- `tree_diagnostics.csv`: root split, depth, Sackin/Colless and singleton-child diagnostics.
+
+`DP revenue >= greedy revenue` is an implementation guarantee. A higher
+revenue is not by itself evidence of better music analysis; Boundary F1 and
+tree-shape diagnostics must be reported separately.
+
+### Boundary-aware intermediate evaluation
+
+    python scripts\evaluate_boundary_aware_stage.py
+    python scripts\evaluate_boundary_aware_stage.py --quick
+    python scripts\evaluate_boundary_aware_stage.py --outer-work n11op95
+
+This is the recommended experiment after the ordered-affinity baseline. It
+replaces fixed-depth boundary extraction with a calibrated salience score:
+
+    salience(k) = normalized LCA leaf span(k) * local boundary contrast(k)
+
+Local contrast uses 1, 2, and 4-bin contexts under Euclidean,
+circle-of-fifths, and key-profile representations. It subtracts within-side
+dispersion from left-versus-right dissimilarity. Training-work median/MAD
+statistics calibrate all nine features. The experiment reports an
+equal-weight unsupervised scorer and a simple supervised non-negative logistic
+scorer trained from DCML boundaries.
+
+The shared tree objective is:
+
+    J = (1-lambda) * normalized affinity revenue
+        + lambda * span-weighted contrast
+        - beta * mean squared child-size imbalance
+
+The DP exactly maximises this additive objective. The Greedy baseline remains
+the supervisor-required temporally adjacent bottom-up algorithm and uses the
+same affinity, contrast, lambda, and beta. Lambda, beta, threshold, and budget
+are selected using inner validation. A plain sum of boundary contrasts is not
+used: every complete ordered binary tree contains every adjacent leaf boundary
+exactly once, so that sum would be tree-invariant.
+
+Evaluation is nested and blocked by complete quartet. The outer fold is used
+only for final testing; three grouped inner folds select lambda, the salience
+threshold, and the fixed boundary budget. The same selected configuration is
+used for Greedy and DP. Threshold results are primary, fixed-budget results are
+the fair equal-count comparison, and GT-count rows remain explicitly marked
+oracle diagnostics. Use --outer-work to resume or distribute formal outer
+folds without weakening their training split.
+
+Outputs are written to results/boundary_aware_stage:
+
+- held_out_per_piece.csv and held_out_per_work.csv: nested out-of-fold metrics;
+- outer_selections.csv: training-only lambda/threshold/budget decisions;
+- learned_contrast_parameters.csv: per-fold feature scales and weights;
+- objective_comparison.csv: DP-minus-Greedy objective guarantees;
+- boundary_salience.csv: every predicted boundary's contrast and LCA span;
+- fold_assignments.csv and training_example_audit.csv: leakage audit trail;
+- work_macro_summary.csv, micro_summary.csv, plots, and Holm-corrected tests.
+
+DP Pitch Scapes for the three music-informed distances:
+
+    python scripts\dptree_keyprofile.py
+    python scripts\dptree_circle_of_fifths.py
+    python scripts\dptree_weighted.py
+
+The figures are saved under results/dp_stage/figures. Add --show to open the
+Matplotlib window. For another piece, supply its matching --midi and --notes
+paths; the output filename is derived from the notes filename. See DATASETS.md
+for compatible formats and conversion guidance.
+
+Pitch Scapes now default to an exact balance-regularized ordered-affinity DP
+with beta=0.6. The regularizer is part of the objective, so the returned tree is
+still a strict global optimum rather than a post-hoc visual rebalance. Run with
+--balance-weight 0 for the unregularized ordered-affinity tree, or with
+--objective additive --balance-weight 0 to reproduce the old comb-prone
+additive figures. Every generated title and terminal report states the chosen
+objective and beta.
+
+The legacy clustering DP minimises the additive objective
+`C(i,j) = min_k C(i,k) + C(k,j) + d(x[i:k], x[k:j])` over all ordered
+binary trees with the fixed input leaves. This is a global optimum for that
+objective only, not for Boundary F1 or musical structure in general. It is
+different from the smaller alignment DP used only to match predicted and DCML
+boundaries during evaluation.
+
+Parameter training uses a deterministic 10/3/3 split of complete quartets, so
+movements from one quartet cannot cross train, validation, and test. The
+calibrated mixture combines Euclidean, circle-of-fifths, and key-profile
+distances after division by training-only non-zero median scales. The diagonal
+Mahalanobis model learns non-negative, sum-to-one pitch-class weights with
+contrastive loss. Held-out test metrics are computed only after weights and
+checkpoint are fixed.
+
+The earlier 10/3/3 parameter script remains available for reproduction. The
+boundary-aware entry point uses nested leave-one-work-out evaluation instead,
+which is the preferred basis for corpus-level accuracy claims.
+
 Use `--help` for piece/method filters and every parameter grid. Add `--include-ablation` to include the fixed-C weighting.
 
 ## Outputs and interpretation
@@ -44,6 +175,12 @@ Use `--help` for piece/method filters and every parameter grid. Add `--include-a
 - `primary_paired_tests.csv`: work-blocked paired sign-flip permutation tests with Holm correction.
 - `ted_auxiliary_per_piece.csv`: auxiliary flat-tree TED and all required size/pruning diagnostics.
 - `metadata.json` and `run_status.csv`: definitions, seed, configuration, and success/failure audit trail.
+
+The intermediate scripts write to `results/dp_stage` and
+`results/dp_parametric`. Their outputs include per-movement and per-work
+Boundary F1, greedy/DP objectives and gaps, runtimes, split assignments,
+training-only scales, learned weights, checkpoint history, and held-out test
+comparisons.
 
 Precision-recall plots contain tolerance/depth operating points; they are not confidence-threshold PR curves. Generated results are ignored by git and are reproducible from the command above.
 

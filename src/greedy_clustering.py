@@ -1,5 +1,6 @@
 '''Contiguous greedy clustering and centralised pitch-class distances.'''
 from fractions import Fraction
+from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
@@ -48,6 +49,14 @@ def _norm(vector):
     vector=np.asarray(vector,dtype=float); total=vector.sum()
     return vector/total if total>0 else np.full(12,1/12)
 
+def _norm_batch(vectors):
+    vectors=np.asarray(vectors,dtype=float)
+    if vectors.ndim==1: vectors=vectors[None,:]
+    totals=vectors.sum(axis=1,keepdims=True)
+    result=np.full_like(vectors,1/vectors.shape[1],dtype=float)
+    np.divide(vectors,totals,out=result,where=totals>0)
+    return result
+
 def _corr(a,b):
     return 0.0 if np.std(a)==0 or np.std(b)==0 else float(np.corrcoef(a,b)[0,1])
 
@@ -86,22 +95,62 @@ def key_activation(vector):
         values += [_corr(vector,np.roll(KS_MAJOR,tonic)),_corr(vector,np.roll(KS_MINOR,tonic))]
     return np.asarray(values)
 
+_KEY_PROFILES=np.vstack([profile for tonic in range(12)
+    for profile in (np.roll(KS_MAJOR,tonic),np.roll(KS_MINOR,tonic))])
+_CENTERED_KEY_PROFILES=_KEY_PROFILES-_KEY_PROFILES.mean(axis=1,keepdims=True)
+_CENTERED_KEY_PROFILES/=(np.linalg.norm(_CENTERED_KEY_PROFILES,axis=1,keepdims=True)+1e-15)
+
+def key_activation_batch(vectors):
+    vectors=_norm_batch(vectors)
+    centered=vectors-vectors.mean(axis=1,keepdims=True)
+    norms=np.linalg.norm(centered,axis=1,keepdims=True)
+    normalized=np.divide(centered,norms,out=np.zeros_like(centered),where=norms>0)
+    return normalized@_CENTERED_KEY_PROFILES.T
+
 def d_key_profile(a,b): return float(np.linalg.norm(key_activation(a)-key_activation(b)))
 
 FIXED_C_MAJOR_WEIGHTS=KS_MAJOR/KS_MAJOR.sum()
 d_fixed_c_major_weighted=make_weighted_distance(FIXED_C_MAJOR_WEIGHTS)
 
-def distance_functions(piece_pc_vector=None,include_ablation=False):
-    distances={'euclidean':d_euclidean,'circle_of_fifths':d_circle_of_fifths,
-               'key_profile':d_key_profile}; key=None
+@dataclass(frozen=True)
+class DistanceSpec:
+    name: str
+    transform_batch: object
+
+    def transform(self,vector):
+        return np.asarray(self.transform_batch(np.asarray(vector)[None,:]))[0]
+
+    def __call__(self,left,right):
+        return float(np.linalg.norm(self.transform(left)-self.transform(right)))
+
+    def batch_distance(self,left,right):
+        left_repr=self.transform_batch(np.asarray(left,dtype=float))
+        right_repr=self.transform_batch(np.asarray(right,dtype=float))
+        return np.linalg.norm(left_repr-right_repr,axis=1)
+
+def distance_specs(piece_pc_vector=None,include_ablation=False):
+    specs={
+        'euclidean':DistanceSpec('euclidean',_norm_batch),
+        'circle_of_fifths':DistanceSpec('circle_of_fifths',lambda values:
+            np.column_stack((_norm_batch(values)@np.cos(_ANGLES),
+                             _norm_batch(values)@np.sin(_ANGLES)))),
+        'key_profile':DistanceSpec('key_profile',key_activation_batch),
+    }; key=None
     if piece_pc_vector is not None:
         tonic,mode,score=estimate_global_key(piece_pc_vector)
-        distances['tonic_weighted']=make_weighted_distance(tonic_relative_weights(tonic,mode))
+        weights=tonic_relative_weights(tonic,mode)
+        specs['tonic_weighted']=DistanceSpec('tonic_weighted',lambda values,w=weights:
+            _norm_batch(values)*np.sqrt(w))
         key={'tonic_pc':tonic,'tonic':PITCH_CLASS_NAMES[tonic],
              'mode':mode,'correlation':score}
     if include_ablation:
-        distances['fixed_c_major_weighted_ablation']=d_fixed_c_major_weighted
-    return distances,key
+        specs['fixed_c_major_weighted_ablation']=DistanceSpec(
+            'fixed_c_major_weighted_ablation',lambda values:
+            _norm_batch(values)*np.sqrt(FIXED_C_MAJOR_WEIGHTS))
+    return specs,key
+
+def distance_functions(piece_pc_vector=None,include_ablation=False):
+    return distance_specs(piece_pc_vector,include_ablation)
 
 class ClusterNode:
     def __init__(self,start,end,feature,children=None,merge_order=-1):
