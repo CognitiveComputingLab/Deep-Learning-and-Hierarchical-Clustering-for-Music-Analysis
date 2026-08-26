@@ -162,6 +162,58 @@ The earlier 10/3/3 parameter script remains available for reproduction. The
 boundary-aware entry point uses nested leave-one-work-out evaluation instead,
 which is the preferred basis for corpus-level accuracy claims.
 
+### Deep metric and reinforcement-learning extension
+
+The advanced extension trains a 12-32-16-16 Siamese pitch-class encoder and
+then two adjacent-merge REINFORCE policies. One policy freezes the pretrained
+encoder; the other fine-tunes it with sequence-level reward. The terminal
+reward is average precision of the tree's boundary-prominence ranking against
+training-work DCML local-key boundaries. Policy rollout itself is annotation
+free. This learns an approximate strategy for a boundary-recovery proxy, not a
+unique or expert-authored musical hierarchy.
+
+The extension reports both the original aggregate-cluster Greedy algorithm and
+a strict search-only comparison. In the latter, key-profile/Siamese affinity is
+held fixed while adjacent average-linkage Greedy is compared with exact ordered
+affinity DP. This prevents a Greedy-versus-DP row from silently changing both
+the search algorithm and the tree objective. Each affinity Greedy/DP pair also
+shares one validation-selected fixed boundary budget.
+
+Run a development smoke test with:
+
+    python scripts\train_deep_clustering.py --quick
+
+Run the pre-specified three-seed experiment with:
+
+    python scripts\train_deep_clustering.py --seeds 20260827 20260828 20260829
+
+The extension uses the same deterministic 10/3/3 complete-work split as the
+parametric experiment. Siamese checkpoints are selected by validation
+work-macro boundary-classification AP. RL checkpoints are selected by
+validation work-macro tree boundary AP (movement AP is averaged within each
+work before works are macro-averaged). Each model's fixed boundary budget is
+also selected on validation. All seed checkpoints and budgets are frozen
+before test harmonies are loaded and the single held-out phase begins.
+
+DCML boundary times are projected to distinct ordered internal bin edges with a
+minimum-error dynamic program. This avoids collapsing two nearby annotations
+onto one bin whenever enough internal edges exist. The projection error and any
+unavoidable loss are recorded for every movement.
+
+Outputs under `results/deep_clustering` include metric/RL histories, model
+checkpoints, held-out per-piece and per-work metrics, neural boundary
+classification AP, tree diagnostics, deterministic action trajectories,
+ablation summaries, learning curves, split assignments, and a configuration
+record. `held_out_per_seed.csv` contains one work-macro row per model/seed;
+`held_out_summary.csv` computes mean and standard deviation across those seed
+rows. `access_audit.csv` verifies that test annotations were loaded after all
+checkpoints/budgets were frozen, and `boundary_projection_audit.csv` records
+the annotation-to-bin discretisation. `experiment_state.json` is updated after
+each completed seed and phase, so an interrupted overnight run does not look
+like a completed experiment. The held-out set contains only three works, so this experiment is an
+advanced exploratory extension and is not a basis for strong significance
+claims.
+
 Use `--help` for piece/method filters and every parameter grid. Add `--include-ablation` to include the fixed-C weighting.
 
 ## Outputs and interpretation

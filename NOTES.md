@@ -77,9 +77,10 @@ both searches, so the comparison isolates the search procedure.
 On the 70-movement, 16-work key-profile scan at 8 qb and 8-qb tolerance,
 all movements completed. The final out-of-fold work-level results were Greedy
 F1 0.4402 and DP F1 0.4604; the paired work-level DP-minus-Greedy permutation
-p-value was 0.0323. These values are reproducible experimental
-outputs, not a promise for other datasets or evidence of expert hierarchical
-agreement.
+p-value was 0.0323. These are a historical run record: the corresponding CSVs
+were lost with the previous machine and must be regenerated before the numbers
+are quoted in the dissertation. They are not a promise for other datasets or
+evidence of expert hierarchical agreement.
 
 ## Boundary-aware objective
 
@@ -120,3 +121,29 @@ If inner validation selects lambda zero, report that honestly: it means local
 contrast helped boundary ranking but did not justify changing the tree under
 that fold. If objective gains do not improve held-out Boundary F1, the correct
 interpretation remains objective/annotation mismatch rather than DP failure.
+
+## Deep-learning extension scope
+
+The Siamese encoder learns a nonlinear embedding distance from balanced
+adjacent-interval boundary examples. REINFORCE subsequently learns an ordered
+adjacent-merge policy using the complete tree's boundary-prominence average
+precision as a terminal training reward. A self-critical deterministic rollout
+is the baseline. The frozen-encoder and jointly fine-tuned policies are both
+reported so that any gain from sequence-level representation updates is an
+explicit ablation.
+
+This does not turn ABC into hierarchical ground truth. The reward is derived
+from flat local-key boundaries, and the held-out split contains three complete
+works. Describe the policy as an approximate learned strategy for a
+boundary-recovery proxy. It has no global-optimality guarantee and must not be
+called the true or best musical hierarchy. Test annotations are not loaded
+until all seed checkpoints and model-specific budgets have been frozen on the
+validation works; `access_audit.csv` records this order. RL validation first
+averages movements within each work, then macro-averages works.
+
+For search-only comparisons, the fixed key-profile or Siamese leaf affinity is
+shared by adjacent average-linkage Greedy and exact ordered-affinity DP. The
+legacy aggregate-cluster Greedy rows remain explicitly named as additional
+baselines. Reference boundary times are projected to distinct ordered bin
+edges by minimum-error dynamic programming, with collisions and projection
+errors written to `boundary_projection_audit.csv`.

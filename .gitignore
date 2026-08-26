@@ -2,6 +2,8 @@
 # Python
 __pycache__/
 *.pyc
+.venv/
+.matplotlib-cache/
 
 # External clones (not part of this project)
 external/pitchscapes-repo/
@@ -10,4 +12,13 @@ external/pitchscapes-repo/
 *.mid
 *.midi
 *.png
-results/
+*.pt
+results/*
+
+# Keep the compact CSV/JSON evidence from formal experiments visible to Git.
+# Large checkpoints and plots remain ignored by the patterns above and should
+# also be copied to the dissertation backup/archive.
+!results/greedy_eval/
+!results/dp_additive_stage/
+!results/optimized_stage/
+!results/deep_clustering/

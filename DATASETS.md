@@ -37,6 +37,17 @@ Then pass that MIDI and the compatible notes TSV to a DP visualization script.
 Exported MIDI timing must be checked against the TSV total duration, especially
 for repeats and alternative endings.
 
+The bundled export helper creates the default Op. 95 MIDI in the project root:
+
+    powershell -ExecutionPolicy Bypass -File scripts\export_abc_midi.ps1
+
+Export all 70 ABC scores to `results\midi` with:
+
+    powershell -ExecutionPolicy Bypass -File scripts\export_abc_midi.ps1 -All
+
+Pass `-MuseScore` if MuseScore 4 is installed at a non-default location, and
+`-Piece piece_id` or `-Piece piece_a,piece_b` to export selected movements.
+
 ## Usable after conversion or pairing
 
 ### Pitchscapes repository examples
