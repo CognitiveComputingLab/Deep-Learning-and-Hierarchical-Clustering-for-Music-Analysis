@@ -16,7 +16,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from greedy_clustering import ClusterNode
-from greedy_evaluation import boundary_prominence
+from greedy_evaluation import boundary_prominence_scores
 
 
 def l1_normalize_tensor(values: torch.Tensor) -> torch.Tensor:
@@ -38,32 +38,148 @@ def transpose_pitch_classes(values: torch.Tensor, shifts: torch.Tensor | int) ->
     return torch.gather(values, 1, columns)
 
 
-class PitchClassEncoder(nn.Module):
-    """Small Siamese encoder appropriate for the 3k-example ABC training set."""
+def _circular_conv(in_channels: int, out_channels: int, *, dilation: int) -> nn.Conv1d:
+    return nn.Conv1d(
+        in_channels, out_channels, kernel_size=3, dilation=dilation,
+        padding=dilation, padding_mode="circular",
+    )
 
+
+class _CircularResidualBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        self.first = _circular_conv(channels, channels, dilation=1)
+        self.first_norm = nn.GroupNorm(4, channels)
+        self.second = _circular_conv(channels, channels, dilation=1)
+        self.second_norm = nn.GroupNorm(4, channels)
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        residual = values
+        values = F.relu(self.first_norm(self.first(values)))
+        values = self.second_norm(self.second(values))
+        return F.relu(values + residual)
+
+
+class MLPPitchClassEncoder(nn.Module):
+    """Original non-equivariant encoder retained only for strict ablation."""
+
+    architecture_name = "mlp"
     output_dim = 16
 
     def __init__(self, dropout: float = 0.1):
         super().__init__()
         self.network = nn.Sequential(
-            nn.Linear(12, 32),
-            nn.LayerNorm(32),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(32, 16),
-            nn.ReLU(),
-            nn.Linear(16, self.output_dim),
+            nn.Linear(12, 32), nn.LayerNorm(32), nn.ReLU(), nn.Dropout(dropout),
+            nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, self.output_dim),
         )
+
+    def architecture_config(self) -> dict[str, Any]:
+        return {
+            "name": self.architecture_name,
+            "input_pitch_classes": 12,
+            "hidden_dimensions": [32, 16],
+            "embedding_dim": self.output_dim,
+            "joint_transposition_distance_invariance": "augmentation_only",
+        }
 
     def forward(self, values: torch.Tensor) -> torch.Tensor:
         values = l1_normalize_tensor(values.float())
         return F.normalize(self.network(values), p=2, dim=-1, eps=1e-12)
 
 
+class PitchClassEncoder(nn.Module):
+    """Circular harmonic CNN with exactly joint-transposition-invariant distance.
+
+    Circular convolutions are equivariant to pitch-class rotation.  Selected
+    Fourier coefficients are stored as real/imaginary pairs, so a common
+    transposition rotates each pair orthogonally.  Euclidean distance between
+    two embeddings is therefore unchanged by a common transposition while the
+    embedding itself still retains tonic phase.
+    """
+
+    architecture_name = "circular_harmonic_cnn"
+    dilations = (1, 3, 4, 5)
+    harmonics = (1, 3, 4, 5)
+    branch_channels = 4
+    harmonic_channels = 2
+    complex_pair_count = harmonic_channels * len(harmonics)
+    output_dim = complex_pair_count * 2
+    pair_feature_dim = complex_pair_count * 5
+
+    def __init__(self, dropout: float = 0.1):
+        super().__init__()
+        channels = self.branch_channels * len(self.dilations)
+        self.branches = nn.ModuleList([
+            _circular_conv(1, self.branch_channels, dilation=dilation)
+            for dilation in self.dilations
+        ])
+        self.stem_norm = nn.GroupNorm(4, channels)
+        self.residual = _CircularResidualBlock(channels)
+        self.dropout = nn.Dropout1d(dropout)
+        self.harmonic_projection = nn.Conv1d(
+            channels, self.harmonic_channels, kernel_size=1, bias=False)
+        self.register_buffer(
+            "harmonic_indices", torch.tensor(self.harmonics, dtype=torch.long),
+            persistent=False)
+
+    def architecture_config(self) -> dict[str, Any]:
+        return {
+            "name": self.architecture_name,
+            "input_pitch_classes": 12,
+            "dilations": list(self.dilations),
+            "branch_channels": self.branch_channels,
+            "residual_channels": self.branch_channels * len(self.dilations),
+            "harmonic_channels": self.harmonic_channels,
+            "selected_harmonics": list(self.harmonics),
+            "embedding_dim": self.output_dim,
+            "joint_transposition_distance_invariance": "architectural",
+        }
+
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        values = l1_normalize_tensor(values.float()).unsqueeze(1)
+        features = torch.cat([branch(values) for branch in self.branches], dim=1)
+        features = F.relu(self.stem_norm(features))
+        features = self.dropout(self.residual(features))
+        harmonic_signal = self.harmonic_projection(features)
+        spectrum = torch.fft.rfft(harmonic_signal, n=12, dim=-1, norm="ortho")
+        selected = spectrum.index_select(-1, self.harmonic_indices)
+        embedding = torch.view_as_real(selected).reshape(len(values), self.output_dim)
+        return F.normalize(embedding, p=2, dim=-1, eps=1e-12)
+
+
+def build_pitch_class_encoder(name: str, dropout: float = 0.1) -> nn.Module:
+    normalized = str(name).strip().lower().replace("-", "_")
+    if normalized in {"harmonic", "harmonic_cnn", "circular_harmonic_cnn"}:
+        return PitchClassEncoder(dropout=dropout)
+    if normalized == "mlp":
+        return MLPPitchClassEncoder(dropout=dropout)
+    raise ValueError(f"unknown pitch-class encoder: {name}")
+
+
+def invariant_harmonic_pair_features(left: torch.Tensor,
+                                     right: torch.Tensor) -> torch.Tensor:
+    """Construct policy features invariant to a common harmonic phase rotation."""
+    if left.shape != right.shape or left.ndim != 2 or left.shape[1] != PitchClassEncoder.output_dim:
+        raise ValueError("left/right must be matching harmonic embedding batches")
+    left_pairs = left.reshape(len(left), PitchClassEncoder.complex_pair_count, 2)
+    right_pairs = right.reshape(len(right), PitchClassEncoder.complex_pair_count, 2)
+    left_amplitude = torch.linalg.vector_norm(left_pairs, dim=-1)
+    right_amplitude = torch.linalg.vector_norm(right_pairs, dim=-1)
+    difference_amplitude = torch.linalg.vector_norm(left_pairs - right_pairs, dim=-1)
+    # z_left * conjugate(z_right): relative phase is unchanged when both
+    # coefficients receive the same transposition-dependent phase rotation.
+    relative_real = (left_pairs * right_pairs).sum(dim=-1)
+    relative_imag = (left_pairs[..., 1] * right_pairs[..., 0]
+                     - left_pairs[..., 0] * right_pairs[..., 1])
+    relative = torch.stack((relative_real, relative_imag), dim=-1).flatten(1)
+    return torch.cat((left_amplitude, right_amplitude, difference_amplitude,
+                      relative), dim=1)
+
+
 class BoundaryDistanceModel(nn.Module):
     """Siamese distance plus a monotonic boundary-classification head."""
 
-    def __init__(self, encoder: PitchClassEncoder | None = None):
+    def __init__(self, encoder: nn.Module | None = None):
         super().__init__()
         self.encoder = encoder or PitchClassEncoder()
         self.raw_scale = nn.Parameter(torch.tensor(0.0))
@@ -81,7 +197,7 @@ class NeuralEmbeddingDistance:
 
     name = "siamese_embedding"
 
-    def __init__(self, encoder: PitchClassEncoder, device: str | torch.device = "cpu"):
+    def __init__(self, encoder: nn.Module, device: str | torch.device = "cpu"):
         self.encoder = encoder
         self.device = torch.device(device)
         self.encoder.to(self.device)
@@ -110,7 +226,7 @@ class NeuralEmbeddingDistance:
 
 
 class MergePolicy(nn.Module):
-    input_dim = 68
+    input_dim = PitchClassEncoder.pair_feature_dim + 4
 
     def __init__(self):
         super().__init__()
@@ -124,6 +240,12 @@ class MergePolicy(nn.Module):
         if candidates.ndim != 2 or candidates.shape[1] != self.input_dim:
             raise ValueError(f"candidates must have shape (n, {self.input_dim})")
         return self.network(candidates).squeeze(-1)
+
+    @staticmethod
+    def embedding_distance(candidates: torch.Tensor) -> torch.Tensor:
+        start = 2 * PitchClassEncoder.complex_pair_count
+        end = 3 * PitchClassEncoder.complex_pair_count
+        return torch.linalg.vector_norm(candidates[:, start:end], dim=1)
 
 
 @dataclass
@@ -186,6 +308,7 @@ class AdjacentMergeEnvironment:
                                  dtype=torch.float32, device=device)
         embeddings = encoder(values)
         left, right = embeddings[:-1], embeddings[1:]
+        pair_features = invariant_harmonic_pair_features(left, right)
         counts_left = torch.tensor([item.leaf_count for item in self.clusters[:-1]],
                                    dtype=torch.float32, device=device)
         counts_right = torch.tensor([item.leaf_count for item in self.clusters[1:]],
@@ -198,7 +321,7 @@ class AdjacentMergeEnvironment:
             torch.tensor([item.last for item in self.clusters[:-1]],
                          dtype=torch.float32, device=device) / self.n_leaves,
         ), dim=1)
-        return torch.cat((left, right, torch.abs(left - right), left * right, scalars), dim=1)
+        return torch.cat((pair_features, scalars), dim=1)
 
     def safe_actions(self, reference_indices: Iterable[int]) -> list[int]:
         boundaries = set(int(value) for value in reference_indices)
@@ -362,13 +485,9 @@ def boundary_average_precision(root: Any, bounds: Sequence[float],
     """Score a completed tree; kept separate from annotation-free rollout."""
     bounds = np.asarray(bounds, dtype=float)
     edges = np.r_[bounds[0, 0], bounds[:, 1]] if bounds.ndim == 2 else bounds
-    internal = edges[1:-1]
     references = set(int(value) for value in reference_indices)
     labels = np.asarray([int(index in references) for index in range(1, len(edges) - 1)])
-    scores = np.zeros(len(internal), dtype=float)
-    for rank, row in enumerate(boundary_prominence(root)):
-        index = int(np.argmin(np.abs(internal - row["boundary_qb"])))
-        scores[index] = float(row["lca_leaf_count"]) + 1e-6 * (len(internal) - rank)
+    scores = boundary_prominence_scores(root, edges)
     return average_precision(labels, scores)
 
 

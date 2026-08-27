@@ -1,12 +1,15 @@
 # Deep Learning and Hierarchical Clustering for Music Analysis
 
-This repository evaluates temporally contiguous hierarchical clustering on music data. It contains the completed greedy baseline plus an intermediate stage that compares greedy merging with exact interval dynamic programming and trains simple parametric distances.
+This repository evaluates temporally contiguous hierarchical clustering on
+music data, from interpretable Greedy and exact ordered DP baselines to a
+Siamese circular/harmonic encoder and an adjacent-merge REINFORCE policy.
 
 ## Research questions
 
-1. Do music-informed distance functions change greedy hierarchical clustering outcomes?
-2. Which distance best recovers DCML local-key boundaries?
-3. Are conclusions stable across input bin size, boundary tolerance, evaluation depth, and TED time-label bins?
+1. Do music-informed distances improve adjacent Greedy clustering?
+2. Does exact ordered DP improve a shared objective and boundary recovery over Greedy?
+3. Does Siamese metric learning generalise to unseen works better than handcrafted distance?
+4. Does sequence-level reinforcement learning improve the complete merge policy?
 
 ## Evaluation design
 
@@ -18,13 +21,20 @@ Distances are Euclidean, tonic-relative weighted chromagram, a two-dimensional c
 
 ## Reproduce
 
+The only supported formal orchestration entry point is:
+
 ```powershell
-python scripts\eval_greedy.py
+.\.venv\Scripts\python.exe scripts\run_dissertation_experiments.py --quick
+.\.venv\Scripts\python.exe scripts\run_dissertation_experiments.py --stage all --device cuda --resume
 ```
 
-This discovers all paired files under `external/ABC/notes` and `external/ABC/harmonies`, uses 100 seeded random-baseline repetitions, and writes CSV, JSON, and plots to `results/greedy_eval`.
+It writes the immutable input/checksum audit, environment, per-stage status,
+formal outputs, checkpoints, and zero-shot external results below
+`results/dissertation_main/`. If a Taking Form or Fugue score cannot be paired
+reliably, it is written to `exclusion_audit.csv`; ABC experiments continue and
+the missing external stage is never reported as a successful run.
 
-Useful development runs:
+Useful component development runs:
 
 ```powershell
 python scripts\eval_greedy.py --piece n11op95_01 --quick
@@ -164,20 +174,40 @@ which is the preferred basis for corpus-level accuracy claims.
 
 ### Deep metric and reinforcement-learning extension
 
-The advanced extension trains a 12-32-16-16 Siamese pitch-class encoder and
-then two adjacent-merge REINFORCE policies. One policy freezes the pretrained
-encoder; the other fine-tunes it with sequence-level reward. The terminal
-reward is average precision of the tree's boundary-prominence ranking against
+The advanced extension trains a compact circular harmonic Siamese encoder and
+then two adjacent-merge REINFORCE policies. Four circular Conv1D branches use
+dilations 1, 3, 4, and 5, followed by a 16-channel residual block and a
+two-channel harmonic projection. Real/imaginary coefficients for harmonics 1,
+3, 4, and 5 form the 16-D embedding. A common pitch-class transposition rotates
+each harmonic pair orthogonally, so embedding Euclidean distance is exactly
+joint-transposition invariant for any learned weights. The embedding itself is
+equivariant rather than invariant and therefore retains tonic phase.
+
+The policy receives harmonic amplitudes, pairwise difference amplitudes, and
+relative complex phases. These candidate features—and hence deterministic
+policy actions—are also invariant to jointly transposing an episode. One policy
+freezes the pretrained encoder; the other fine-tunes it with sequence-level
+reward. The terminal
+reward is average precision of the tree's duration-normalised LCA temporal-span
+boundary-prominence ranking against
 training-work DCML local-key boundaries. Policy rollout itself is annotation
 free. This learns an approximate strategy for a boundary-recovery proxy, not a
 unique or expert-authored musical hierarchy.
+
+The current cluster state still sums its constituent bins into one 12-D
+pitch-class histogram. Consequently it cannot distinguish two intervals with
+identical aggregate pitch content but different temporal order. A small
+pitch-CNN plus temporal TCN/BiGRU is reserved as future work; it is not silently
+added to this small-data experiment, and no Transformer is used.
 
 The extension reports both the original aggregate-cluster Greedy algorithm and
 a strict search-only comparison. In the latter, key-profile/Siamese affinity is
 held fixed while adjacent average-linkage Greedy is compared with exact ordered
 affinity DP. This prevents a Greedy-versus-DP row from silently changing both
-the search algorithm and the tree objective. Each affinity Greedy/DP pair also
-shares one validation-selected fixed boundary budget.
+the search algorithm and the tree objective. Each affinity Greedy/DP pair
+shares one validation-selected fixed ABC boundary budget. A single
+length-relative budget is selected across all methods on ABC validation and
+frozen before zero-shot Taking Form/Fugue evaluation.
 
 Run a development smoke test with:
 
@@ -186,6 +216,29 @@ Run a development smoke test with:
 Run the pre-specified three-seed experiment with:
 
     python scripts\train_deep_clustering.py --seeds 20260827 20260828 20260829
+
+Before the RL comparison, run the formal metric-learning corpus ablation:
+
+    python scripts\evaluate_neural_corpus.py --device cuda --seeds 20260827 20260828 20260829
+
+This is a four-fold nested, work-blocked out-of-fold experiment over all 16
+complete ABC works. Every work is outer-test data exactly once. Within each
+fold, the remaining works are divided into training and validation works;
+outer-test harmonies are not loaded until both MLP and circular-harmonic CNN
+checkpoints and their shared Greedy/DP boundary budgets have been frozen. The
+two encoders receive the same folds, examples, minibatch order, joint
+transposition schedule, seeds, and optimizer settings. This is the formal
+`MLP versus circular/harmonic CNN` ablation and the corpus-level Advanced
+Neural+Greedy/DP baseline. It intentionally excludes RL to avoid multiplying
+the exploratory policy experiment across 24 metric-training runs.
+
+Outputs under `results/neural_corpus` use work-macro Precision, Recall, and F1
+as primary metrics. Boundary-prominence AP, TED, tree shape, shared-objective
+revenue, and runtime are auxiliary. `fold_assignments.csv` proves that each
+work is tested once, `access_audit.csv` records the freeze-before-test order,
+and `ablation_summary.csv` directly reports harmonic-CNN minus MLP and neural
+minus key-profile DP differences. Architecture selection must be interpreted
+from this pre-specified ablation, not from the earlier quick smoke result.
 
 The extension uses the same deterministic 10/3/3 complete-work split as the
 parametric experiment. Siamese checkpoints are selected by validation
@@ -200,7 +253,7 @@ minimum-error dynamic program. This avoids collapsing two nearby annotations
 onto one bin whenever enough internal edges exist. The projection error and any
 unavoidable loss are recorded for every movement.
 
-Outputs under `results/deep_clustering` include metric/RL histories, model
+Outputs under `results/dissertation_main/deep` include metric/RL histories, model
 checkpoints, held-out per-piece and per-work metrics, neural boundary
 classification AP, tree diagnostics, deterministic action trajectories,
 ablation summaries, learning curves, split assignments, and a configuration
@@ -209,10 +262,28 @@ record. `held_out_per_seed.csv` contains one work-macro row per model/seed;
 rows. `access_audit.csv` verifies that test annotations were loaded after all
 checkpoints/budgets were frozen, and `boundary_projection_audit.csv` records
 the annotation-to-bin discretisation. `experiment_state.json` is updated after
-each completed seed and phase, so an interrupted overnight run does not look
-like a completed experiment. The held-out set contains only three works, so this experiment is an
+each completed seed and phase. Per-seed checkpoints and histories support
+`--resume`, so an interrupted overnight run does not look like a completed
+experiment. The held-out set contains only three works, so this experiment is an
 advanced exploratory extension and is not a basis for strong significance
 claims.
+
+### Greedy / DP / learned-distance Pitch Scapes
+
+After the non-quick three-seed deep stage is complete, generate the five
+pre-registered dissertation visualisations with:
+
+    .\.venv\Scripts\python.exe scripts\run_dissertation_experiments.py --stage visualize --device cuda
+
+The figures are written below `results/dissertation_main/pitch_scapes`, with
+one music-named directory per movement. Each directory contains separate
+key-profile affinity Greedy, exact key-profile ordered-DP, and harmonic-CNN
+distance plus exact ordered-DP images, a three-panel comparison with ABC
+local-key reference boundaries, complete node coordinates, and model/data
+metadata. The Pitch Scape is constructed directly from the ABC notes TSV on
+the same quarter-beat timeline as clustering, so MuseScore and MIDI export are
+not required. The visualisation command rejects quick/smoke checkpoints and
+selects its formal neural seed by validation AP only.
 
 Use `--help` for piece/method filters and every parameter grid. Add `--include-ablation` to include the fixed-C weighting.
 

@@ -1,0 +1,11 @@
+{
+  "phase": "development_data_loaded",
+  "completed_seeds": [],
+  "requested_seeds": [
+    20260827,
+    20260828,
+    20260829
+  ],
+  "device": "cuda",
+  "quick": false
+}

@@ -99,9 +99,37 @@ def boundary_prominence(root):
                      'merge_order':int(getattr(node,'merge_order',-1))})
         return left_leaves+right_leaves
     walk(root)
-    return sorted(rows,key=lambda row:(-row['lca_span_qb'],-row['lca_leaf_count'],
+    total_span=float(root.end-root.start)
+    if not np.isfinite(total_span) or total_span<=0:
+        raise ValueError('tree must have a finite positive temporal span')
+    for row in rows:
+        row['prominence']=row['lca_span_qb']/total_span
+    return sorted(rows,key=lambda row:(-row['prominence'],-row['lca_leaf_count'],
         row['child_mean_affinity'] if np.isfinite(row['child_mean_affinity']) else np.inf,
         -row['merge_order'],row['boundary_qb']))
+
+def boundary_prominence_scores(root,bounds):
+    '''Return one canonical time-span prominence score per internal bin edge.
+
+    This is the single ranking used by fixed-budget evaluation, average
+    precision, and the RL terminal reward.  Matching is by the exact temporal
+    edge represented by each ordered-tree split; the nearest-edge fallback is
+    retained only for small floating-point conversion errors.
+    '''
+    bounds=np.asarray(bounds,dtype=float)
+    edges=np.r_[bounds[0,0],bounds[:,1]] if bounds.ndim==2 else bounds
+    if edges.ndim!=1 or len(edges)<2 or np.any(np.diff(edges)<=0):
+        raise ValueError('bounds must define strictly increasing bin edges')
+    internal=edges[1:-1]
+    scores=np.zeros(len(internal),dtype=float)
+    for row in boundary_prominence(root):
+        if not len(internal): break
+        index=int(np.argmin(np.abs(internal-row['boundary_qb'])))
+        tolerance=1e-7*max(1.0,abs(float(row['boundary_qb'])))
+        if abs(float(internal[index])-float(row['boundary_qb']))>tolerance:
+            raise ValueError('tree boundary does not coincide with a supplied bin edge')
+        scores[index]=float(row['prominence'])
+    return scores
 
 def collect_prominent_splits(root,budget):
     '''Select an equal number of the tree's most structurally prominent splits.'''

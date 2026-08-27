@@ -132,6 +132,15 @@ is the baseline. The frozen-encoder and jointly fine-tuned policies are both
 reported so that any gain from sequence-level representation updates is an
 explicit ablation.
 
+The encoder is now a compact circular harmonic CNN: parallel circular Conv1D
+branches at dilations 1, 3, 4, and 5 feed a 16-channel residual block; two
+projected feature channels contribute complex Fourier coefficients at
+harmonics 1, 3, 4, and 5. Their real/imaginary pairs form a 16-D equivariant
+embedding. Joint transposition acts only as orthogonal rotations of these
+pairs, which makes Euclidean embedding distance exactly invariant without
+discarding tonic phase. RL candidate features use harmonic amplitudes and
+relative phases, making the deterministic merge trajectory invariant as well.
+
 This does not turn ABC into hierarchical ground truth. The reward is derived
 from flat local-key boundaries, and the held-out split contains three complete
 works. Describe the policy as an approximate learned strategy for a
@@ -147,3 +156,32 @@ legacy aggregate-cluster Greedy rows remain explicitly named as additional
 baselines. Reference boundary times are projected to distinct ordered bin
 edges by minimum-error dynamic programming, with collisions and projection
 errors written to `boundary_projection_audit.csv`.
+
+Temporal order remains a stated limitation: every current cluster is still the
+sum of its 12-D pitch-class bins, so permutations with identical accumulated
+pitch content cannot be distinguished. A TCN/BiGRU over `T x 12` cluster
+sequences is a future extension, not part of the formal experiment. This keeps
+the data-hungry representation learner small while ordered DP/RL supplies the
+global structural constraint.
+
+## Formal neural-distance corpus ablation
+
+`scripts/evaluate_neural_corpus.py` is the formal Advanced metric-learning
+entry point. It uses four outer work-blocked folds so that all 16 complete ABC
+works receive exactly one unseen-work score. Each fold uses three of the
+remaining works for validation and the rest for training. MLP and circular
+harmonic CNN runs share folds, balanced examples, minibatch order, a dedicated
+seeded joint-transposition schedule, optimizer settings, validation budgets,
+and downstream Greedy/DP objectives.
+
+Run the small integration check with `--quick`, then the three-seed CUDA run:
+
+    python scripts\evaluate_neural_corpus.py --quick --device cuda
+    python scripts\evaluate_neural_corpus.py --device cuda --seeds 20260827 20260828 20260829
+
+The corpus experiment is metric-only. RL remains in the fixed 10/3/3 script,
+where safe-action imitation precedes policy-gradient fine-tuning. This keeps
+the formal ablation computationally bounded and prevents a change in encoder
+architecture from being confounded with a simultaneous change in policy
+training. Primary reporting is work-macro Precision/Recall/F1; AP, TED, tree
+shape, objective revenue, and runtime are auxiliary diagnostics.

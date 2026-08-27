@@ -1,180 +1,188 @@
-"""
-Loader for Taking Form CSV files.
+"""Validated loader for Taking Form's hierarchical tabular annotations.
 
-Taking Form's tabular format:
-- Column 0: measure number (or 'Repeat:' / range like '9-16=1-8')
-- Column 1: beat number
-- Columns 2+: formal labels from coarsest (left) to finest (right)
-
-We convert this into a labelled tree where each node has:
-- label (str): e.g., 'Exposition', 'Theme a'
-- level (int): depth from root (0 = root = full piece)
-- start_measure (int)
-- end_measure (int)
-- children (list)
+Comparator rows such as ``9-16=1-8`` copy the source interval's annotation
+events into a fully written-out destination interval.  ``Repeat:`` rows denote
+score repeat signs and are audited but do not invent extra notated score time.
 """
-import os
+
+from __future__ import annotations
+
 import re
-import pandas as pd
 from dataclasses import dataclass, field
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Sequence
+
+import pandas as pd
 
 
 @dataclass
 class FormNode:
-    """A node in a hierarchical form analysis tree."""
     label: str
     level: int
     start_measure: int
-    end_measure: Optional[int] = None  # filled in after we know the next sibling/parent's start
-    children: List['FormNode'] = field(default_factory=list)
-    
-    def add_child(self, child: 'FormNode'):
+    end_measure: Optional[int] = None
+    children: List["FormNode"] = field(default_factory=list)
+
+    def add_child(self, child: "FormNode") -> None:
         self.children.append(child)
-    
+
     def pretty_print(self, indent: int = 0) -> str:
         span = f"m.{self.start_measure}"
         if self.end_measure is not None:
             span += f"-{self.end_measure}"
-        s = "  " * indent + f"[{self.label}] ({span})\n"
-        for child in self.children:
-            s += child.pretty_print(indent + 1)
-        return s
-    
+        return ("  " * indent + f"[{self.label}] ({span})\n" +
+                "".join(child.pretty_print(indent + 1) for child in self.children))
+
     def size(self) -> int:
-        """Count total nodes in subtree."""
-        return 1 + sum(c.size() for c in self.children)
-    
+        return 1 + sum(child.size() for child in self.children)
+
+
+@dataclass(frozen=True)
+class TakingFormEvent:
+    measure: int
+    beat: str
+    level: int
+    label: str
+    provenance: str = "explicit"
+    source_measure: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class TakingFormAudit:
+    path: str
+    last_measure: int
+    explicit_events: int
+    copied_events: int
+    comparator_rows: int
+    score_repeat_rows: int
+    issues: tuple[str, ...] = ()
+
+
+_COMPARATOR = re.compile(
+    r"^\s*(?P<d0>\d+)(?:-(?P<d1>\d+))?\s*=\s*"
+    r"(?P<s0>\d+)(?:-(?P<s1>\d+))?\s*$")
+_PLAIN = re.compile(r"^\s*(\d+)(?:[a-z])?\s*$", re.IGNORECASE)
+_REPEAT = re.compile(r"^\s*Repeat:\s*(\d+)(?:-(\d+))?\s*$", re.IGNORECASE)
+
 
 def _parse_measure_field(value: str) -> Optional[int]:
-    """
-    Parse Taking Form's measure column, which may contain:
-      - Plain integer: '125'
-      - Range notation: '125-132=1-8' (means "m.125-132 repeats m.1-8")
-      - 'Repeat:' marker rows (in some files)
-    
-    Returns the first integer found, or None if no integer can be extracted.
-    """
     value = str(value).strip()
-    # Try the simple case first
-    try:
-        return int(value)
-    except ValueError:
-        pass
-    # Try to extract the first integer using regex
-    match = re.match(r'^\s*(\d+)', value)
-    if match:
-        return int(match.group(1))
-    return None
+    match = _PLAIN.match(value) or _COMPARATOR.match(value)
+    return int(match.group(1)) if match else None
+
 
 def _parse_repeat_source(value: str) -> Optional[str]:
-    """
-    If the measure field uses repeat notation like '125-132=1-8' or '65=1',
-    return a human-readable string describing the source measures (e.g. "m.1-8").
-    Returns None if there's no '=' (i.e., this is a normal measure row).
-    
-    Handles whitespace tolerantly: '123-129= 1-7' is treated the same as '123-129=1-7'.
-    """
-    value = str(value).strip()
-    if '=' not in value:
+    match = _COMPARATOR.match(str(value).strip())
+    if not match:
         return None
-    # Split on '=' and take the right-hand side
-    rhs = value.split('=', 1)[1].strip()
-    if not rhs:
-        return None
-    return f"m.{rhs}"
+    end = match.group("s1")
+    return f"m.{match.group('s0')}" + (f"-{end}" if end else "")
 
 
-def load_taking_form_csv(csv_path: str) -> FormNode:
-    """
-    Parse a Taking Form CSV file into a FormNode tree.
-    
-    Returns the root node (representing the whole piece).
-    """
-    df = pd.read_csv(csv_path, header=None, dtype=str, keep_default_na=False)
-    
-    # Detect if first row is a header
-    try:
-        int(df.iloc[0, 0])
-    except (ValueError, TypeError):
-        df = df.iloc[1:].reset_index(drop=True)
-    
-    n_levels = df.shape[1] - 2
-    
-    # ── Find the last measure number in the file ─────────────────
-    # We need this to close any still-open nodes at the end.
-    last_measure = None
-    for _, row in df.iterrows():
-        m = _parse_measure_field(row[0])
-        if m is not None:
-            last_measure = m
-    if last_measure is None:
-        last_measure = 1  # defensive default
-    
-    # Root represents the whole piece.
-    root = FormNode(label="ROOT", level=0, start_measure=1)
-    
-    open_nodes: List[Optional[FormNode]] = [root] + [None] * n_levels
-    
-    for _, row in df.iterrows():
-        measure = _parse_measure_field(row[0])
-        if measure is None:
-            continue  # Skip rows where we can't extract a measure number
-        # Check if this row uses repeat notation (e.g., '125-132=1-8')
-        repeat_source = _parse_repeat_source(row[0])
-        
-        for col_idx in range(2, df.shape[1]):
-            cell = str(row[col_idx]).strip()
-            if not cell or cell.lower() == 'nan':
+def _read_rows(csv_path: str | Path) -> list[list[str]]:
+    frame = pd.read_csv(csv_path, header=None, dtype=str, keep_default_na=False)
+    if frame.empty:
+        raise ValueError(f"empty Taking Form file: {csv_path}")
+    first = str(frame.iloc[0, 0]).strip()
+    if not (_PLAIN.match(first) or _COMPARATOR.match(first) or _REPEAT.match(first)):
+        frame = frame.iloc[1:].reset_index(drop=True)
+    return [[str(value).strip() for value in row]
+            for row in frame.itertuples(index=False, name=None)]
+
+
+def read_taking_form_events(csv_path: str | Path
+                            ) -> tuple[list[TakingFormEvent], TakingFormAudit]:
+    """Expand comparator shorthand into a monotonic event table."""
+    rows = _read_rows(csv_path)
+    events: dict[tuple[int, int], TakingFormEvent] = {}
+    comparator_rows = score_repeat_rows = copied_events = 0
+    issues: list[str] = []
+    last_measure = 0
+
+    for row_number, row in enumerate(rows, 1):
+        token = row[0]
+        repeat = _REPEAT.match(token)
+        if repeat:
+            score_repeat_rows += 1
+            last_measure = max(last_measure, int(repeat.group(2) or repeat.group(1)))
+            continue
+
+        comparator = _COMPARATOR.match(token)
+        plain = _PLAIN.match(token)
+        if not comparator and not plain:
+            issues.append(f"row {row_number}: unsupported measure token {token!r}")
+            continue
+
+        if comparator:
+            comparator_rows += 1
+            destination_start = int(comparator.group("d0"))
+            destination_end = int(comparator.group("d1") or destination_start)
+            source_start = int(comparator.group("s0"))
+            source_end = int(comparator.group("s1") or source_start)
+            if destination_end - destination_start != source_end - source_start:
+                issues.append(f"row {row_number}: comparator ranges have unequal lengths")
                 continue
-            
-            depth = col_idx - 1
+            if source_start >= destination_start:
+                issues.append(f"row {row_number}: comparator source is not earlier")
+                continue
+            source = [event for event in events.values()
+                      if source_start <= event.measure <= source_end]
+            for event in sorted(source, key=lambda value: (value.measure, value.level)):
+                destination = destination_start + event.measure - source_start
+                key = (destination, event.level)
+                if key not in events:
+                    events[key] = TakingFormEvent(
+                        destination, event.beat, event.level, event.label,
+                        provenance="comparator_copy", source_measure=event.measure)
+                    copied_events += 1
+            measure = destination_start
+            last_measure = max(last_measure, destination_end)
+        else:
+            measure = int(plain.group(1))
+            last_measure = max(last_measure, measure)
 
-            # If this row is a repeat, annotate the label
-            if repeat_source is not None:
-                cell = f"{cell} [repeat of {repeat_source}]"
-            
-            # Close previously-open node at this depth (and deeper)
-            for d in range(depth, len(open_nodes)):
-                if open_nodes[d] is not None and open_nodes[d].end_measure is None:
-                    open_nodes[d].end_measure = measure - 1
-            
-            for d in range(depth + 1, len(open_nodes)):
-                open_nodes[d] = None
-            
-            parent = open_nodes[depth - 1] if depth > 0 else root
-            if parent is None:
-                parent = root
-            new_node = FormNode(label=cell, level=depth, start_measure=measure)
-            parent.add_child(new_node)
-            open_nodes[depth] = new_node
-    
-    # ── Close any remaining open nodes with last_measure ──────────
-    # This fixes the bug where the last node of each level lacks end_measure.
-    for d in range(len(open_nodes)):
-        if open_nodes[d] is not None and open_nodes[d].end_measure is None:
-            open_nodes[d].end_measure = last_measure
-    
-    # Also set root's end_measure
-    if root.end_measure is None:
-        root.end_measure = last_measure
-    
+        beat = row[1] if len(row) > 1 else ""
+        for column, label in enumerate(row[2:], start=1):
+            if not label or label.lower() == "nan":
+                continue
+            events[(measure, column)] = TakingFormEvent(
+                measure, beat, column, label, provenance="explicit")
+
+    ordered = sorted(events.values(), key=lambda value: (value.measure, value.level))
+    explicit = sum(event.provenance == "explicit" for event in ordered)
+    audit = TakingFormAudit(
+        str(Path(csv_path)), last_measure, explicit, copied_events,
+        comparator_rows, score_repeat_rows, tuple(issues))
+    return ordered, audit
+
+
+def form_tree_from_events(events: Sequence[TakingFormEvent], last_measure: int) -> FormNode:
+    if last_measure < 1:
+        raise ValueError("last_measure must be positive")
+    root = FormNode("ROOT", 0, 1, last_measure)
+    max_level = max((event.level for event in events), default=0)
+    open_nodes: list[Optional[FormNode]] = [root] + [None] * max_level
+    for event in events:
+        depth = event.level
+        for level in range(depth, len(open_nodes)):
+            node = open_nodes[level]
+            if node is not None and node.end_measure is None:
+                node.end_measure = max(node.start_measure, event.measure - 1)
+        for level in range(depth + 1, len(open_nodes)):
+            open_nodes[level] = None
+        parent = next((open_nodes[level] for level in range(depth - 1, -1, -1)
+                       if open_nodes[level] is not None), root)
+        node = FormNode(event.label, depth, event.measure)
+        parent.add_child(node)
+        open_nodes[depth] = node
+    for node in open_nodes:
+        if node is not None and node.end_measure is None:
+            node.end_measure = last_measure
     return root
 
-if __name__ == "__main__":
-    # Find one CSV file from the Beethoven corpus
-    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    REPO_ROOT = os.path.dirname(SCRIPT_DIR)
-    BEETHOVEN_DIR = os.path.join(REPO_ROOT, "external/Taking-Form/corpus/Beethoven_Sonatas")
-    
-    csv_files = sorted(f for f in os.listdir(BEETHOVEN_DIR) if f.endswith('.csv'))
-    print(f"Found {len(csv_files)} CSV files in Beethoven corpus.")
-    
-    # Load the first one
-    target = csv_files[0]
-    print(f"\nLoading: {target}")
-    tree = load_taking_form_csv(os.path.join(BEETHOVEN_DIR, target))
-    
-    print(f"\nTotal nodes: {tree.size()}")
-    print(f"\nTree structure:")
-    print(tree.pretty_print())
+
+def load_taking_form_csv(csv_path: str | Path) -> FormNode:
+    events, audit = read_taking_form_events(csv_path)
+    if audit.issues:
+        raise ValueError("; ".join(audit.issues))
+    return form_tree_from_events(events, audit.last_measure)

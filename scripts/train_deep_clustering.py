@@ -34,7 +34,8 @@ from greedy_evaluation import (
 from neural_clustering import (
     AdjacentMergeEnvironment, BoundaryDistanceModel, MergePolicy,
     NeuralEmbeddingDistance, PitchClassEncoder, average_precision,
-    boundary_average_precision, project_reference_boundaries,
+    boundary_average_precision, build_pitch_class_encoder,
+    project_reference_boundaries,
     reference_boundary_indices, rollout_policy, state_dict_cpu,
     transpose_pitch_classes,
 )
@@ -58,9 +59,13 @@ def parse_args():
     parser.add_argument("--contexts", nargs="+", type=int, default=[1, 2, 4, 8])
     parser.add_argument("--budgets", nargs="+", type=int,
                         default=[3, 5, 8, 10, 12, 15, 20])
+    parser.add_argument("--external-budget-ratios", nargs="+", type=float,
+                        default=[0.02, 0.04, 0.08, 0.12, 0.16, 0.20])
     parser.add_argument("--bin-size", type=float, default=8.0)
+    parser.add_argument("--bin-sizes", nargs="+", type=float, default=[8.0, 16.0, 32.0],
+                        help="pre-registered train resolutions, finest feasible first")
     parser.add_argument("--tolerance", type=float, default=8.0)
-    parser.add_argument("--max-bins", type=int, default=350)
+    parser.add_argument("--max-bins", type=int, default=192)
     parser.add_argument("--metric-epochs", type=int, default=200)
     parser.add_argument("--metric-patience", type=int, default=20)
     parser.add_argument("--metric-lr", type=float, default=1e-3)
@@ -74,6 +79,8 @@ def parse_args():
     parser.add_argument("--validation-every", type=int, default=5)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="reuse complete per-seed checkpoints in output-dir")
     return parser.parse_args()
 
 
@@ -84,12 +91,14 @@ def configure_quick(args):
     args.train_works, args.validation_works, args.test_works = 3, 1, 2
     args.contexts = [1, 2]
     args.budgets = [3, 5]
+    args.external_budget_ratios = [0.08, 0.12]
     args.metric_epochs = min(args.metric_epochs, 4)
     args.metric_patience = min(args.metric_patience, 2)
     args.imitation_epochs = min(args.imitation_epochs, 2)
     args.rl_epochs = min(args.rl_epochs, 3)
     args.rl_patience = min(args.rl_patience, 2)
     args.validation_every = 1
+    args.bin_sizes = [args.bin_size]
 
 
 def resolve_device(value):
@@ -107,6 +116,88 @@ def seed_everything(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    # Formal experiments prefer reproducibility to peak kernel throughput.
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
+def restore_checkpoint_models(saved, device):
+    """Rehydrate the exact on-disk inference objects and force evaluation mode."""
+    architecture = saved.get("encoder_config", {}).get(
+        "name", "circular_harmonic_cnn")
+    metric = BoundaryDistanceModel(build_pitch_class_encoder(architecture)).to(device)
+    metric.load_state_dict(saved["metric"])
+    metric.eval()
+    rl_models = {}
+    for variant in ("rl_frozen", "rl_joint"):
+        encoder = build_pitch_class_encoder(architecture).to(device)
+        encoder.load_state_dict(saved[f"{variant}_encoder"])
+        policy = MergePolicy().to(device)
+        policy.load_state_dict(saved[f"{variant}_policy"])
+        encoder.eval(); policy.eval()
+        rl_models[variant] = (encoder, policy)
+    return metric, NeuralEmbeddingDistance(metric.encoder, device), rl_models
+
+
+def load_resolution_cache(pairs, bin_sizes, max_bins, *, all_resolutions):
+    """Load all training resolutions or the finest feasible inference one."""
+    candidates = {}
+    failures = {}
+    for bin_size in sorted(set(float(value) for value in bin_sizes)):
+        current, statuses = load_cache(pairs, bin_size, max_bins)
+        for piece, item in current.items():
+            item = dict(item)
+            item["piece"] = piece
+            item["bin_size_qb"] = bin_size
+            candidates.setdefault(piece, []).append(item)
+        for row in statuses:
+            if row["status"] != "success":
+                failures.setdefault(row["piece"], []).append(
+                    f"{bin_size:g}qb: {row['message']}")
+    cache = {}
+    statuses = []
+    for piece, _, _ in pairs:
+        available = sorted(candidates.get(piece, []),
+                           key=lambda item: item["bin_size_qb"])
+        if not available:
+            statuses.append({
+                "piece": piece, "work": work_id(piece), "status": "failed",
+                "message": "; ".join(failures.get(piece, ["no feasible resolution"])),
+                "bin_size_qb": np.nan,
+            })
+            continue
+        selected = available if all_resolutions else available[:1]
+        for item in selected:
+            key = (f"{piece}__bin{item['bin_size_qb']:g}"
+                   if all_resolutions else piece)
+            cache[key] = item
+        statuses.append({
+            "piece": piece, "work": work_id(piece), "status": "success",
+            "message": "", "bin_size_qb": (
+                ",".join(f"{item['bin_size_qb']:g}" for item in selected)
+                if all_resolutions else selected[0]["bin_size_qb"]),
+        })
+    return cache, statuses
+
+
+def _internal_spans(root):
+    """Return the leaf-index spans of all internal nodes in an ordered tree."""
+    cursor = [0]
+    spans = set()
+    def walk(node):
+        children = list(getattr(node, "children", []) or [])
+        if not children:
+            first = cursor[0]
+            cursor[0] += 1
+            return first, first + 1
+        left = walk(children[0])
+        right = walk(children[1])
+        spans.add((left[0], right[1]))
+        return left[0], right[1]
+    walk(root)
+    return spans
 
 
 def deep_interval_examples(cache, contexts, seed):
@@ -174,9 +265,10 @@ def metric_validation(model, examples, device):
     return work_macro_ap(labels.astype(int), logits, works)
 
 
-def train_metric(train_examples, validation_examples, args, seed, device):
+def train_metric(train_examples, validation_examples, args, seed, device,
+                 encoder_name="harmonic_cnn"):
     seed_everything(seed)
-    model = BoundaryDistanceModel().to(device)
+    model = BoundaryDistanceModel(build_pitch_class_encoder(encoder_name)).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.metric_lr,
                                   weight_decay=1e-4)
     left, right, labels, works = example_arrays(train_examples)
@@ -184,6 +276,8 @@ def train_metric(train_examples, validation_examples, args, seed, device):
     weights = np.asarray([1.0 / counts[work] for work in works], dtype=np.float32)
     weights /= weights.mean()
     rng = np.random.default_rng(seed)
+    shift_generator = torch.Generator(device=device.type)
+    shift_generator.manual_seed(seed + 17001)
     history = []
     best_state, best_ap, best_epoch = None, -np.inf, 0
     stale = 0
@@ -197,7 +291,9 @@ def train_metric(train_examples, validation_examples, args, seed, device):
             rt = torch.from_numpy(right[index]).to(device)
             yt = torch.from_numpy(labels[index]).to(device)
             wt = torch.from_numpy(weights[index]).to(device)
-            shifts = torch.randint(0, 12, (len(index),), device=device)
+            shifts = torch.randint(
+                0, 12, (len(index),), device=device,
+                generator=shift_generator)
             lt = transpose_pitch_classes(lt, shifts)
             rt = transpose_pitch_classes(rt, shifts)
             optimizer.zero_grad()
@@ -241,6 +337,7 @@ def boundary_projection_audit(cache, split, tolerance):
     """Describe discretisation error without exposing labels to inference."""
     rows = []
     for piece, item in sorted(cache.items()):
+        item_tolerance = float(item.get("bin_size_qb", tolerance))
         gt = [end for _, end, _ in item["segments"][:-1]]
         bounds = np.asarray(item["bounds"], dtype=float)
         edges = np.r_[bounds[0, 0], bounds[:, 1]] if bounds.ndim == 2 else bounds
@@ -259,8 +356,8 @@ def boundary_projection_audit(cache, split, tolerance):
             "unrepresented_reference_count": len(gt) - len(projection),
             "mean_projection_error_qb": float(errors.mean()) if len(errors) else 0.0,
             "max_projection_error_qb": float(errors.max()) if len(errors) else 0.0,
-            "projected_within_tolerance_count": int(np.sum(errors <= tolerance)),
-            "tolerance_qb": tolerance,
+            "projected_within_tolerance_count": int(np.sum(errors <= item_tolerance)),
+            "tolerance_qb": item_tolerance,
         })
     return rows
 
@@ -280,18 +377,27 @@ def train_imitation(encoder, train_cache, args, seed, device):
             item = train_cache[piece]
             environment = AdjacentMergeEnvironment(item["matrix"], item["bounds"])
             references = item_references(item)
+            teacher_distance = NeuralEmbeddingDistance(encoder, device)
+            teacher_affinity, _ = pairwise_affinity(item["matrix"], teacher_distance)
+            teacher_tree, _ = optimal_affinity_tree(
+                item["matrix"], item["bounds"], teacher_affinity, ClusterNode,
+                max_bins=args.max_bins)
+            teacher_spans = _internal_spans(teacher_tree)
             episode_losses = []
             while not environment.done:
                 features = environment.candidate_features(encoder, device)
                 logits = policy(features)
                 log_probabilities = torch.log_softmax(logits, dim=0)
                 safe = environment.safe_actions(references)
-                if safe:
-                    target = safe[int(torch.argmin(torch.linalg.vector_norm(
-                        features[safe, :16] - features[safe, 16:32], dim=1)).item())]
-                else:
-                    target = int(torch.argmin(torch.linalg.vector_norm(
-                        features[:, :16] - features[:, 16:32], dim=1)).item())
+                distances = MergePolicy.embedding_distance(features)
+                teacher = [
+                    action for action, (left, right) in enumerate(
+                        zip(environment.clusters[:-1], environment.clusters[1:]))
+                    if (left.first, right.last) in teacher_spans]
+                pool = [action for action in teacher if action in safe]
+                if not pool:
+                    pool = safe or teacher or list(range(len(distances)))
+                target = pool[int(torch.argmin(distances[pool]).item())]
                 episode_losses.append(-log_probabilities[target])
                 environment.step(target)
             optimizer.zero_grad()
@@ -457,10 +563,16 @@ SHARED_BUDGET_GROUPS = [
     ("siamese_affinity_greedy", "siamese_dp"),
 ]
 
+EXTERNAL_MODELS = [
+    "key_profile_affinity_greedy", "key_profile_dp",
+    "siamese_affinity_greedy", "siamese_dp", "rl_frozen", "rl_joint",
+]
+
 
 def evaluate_cache(cache, models, neural_distance, rl_models, budgets, tolerance, device):
     rows, diagnostics, trajectories = [], [], []
     for piece, item in sorted(cache.items()):
+        item_tolerance = float(item.get("bin_size_qb", tolerance))
         gt = [end for _, end, _ in item["segments"][:-1]]
         references = item_references(item)
         piece_objectives = {}
@@ -481,7 +593,8 @@ def evaluate_cache(cache, models, neural_distance, rl_models, budgets, tolerance
                 **shape,
             })
             for budget in budgets:
-                score = boundary_scores(collect_prominent_splits(tree, budget), gt, tolerance)
+                score = boundary_scores(
+                    collect_prominent_splits(tree, budget), gt, item_tolerance)
                 rows.append({
                     "piece": piece, "work": item["work"], "model": model,
                     "budget": budget, "boundary_ap": ap, "runtime_seconds": runtime,
@@ -522,6 +635,31 @@ def select_budgets(validation):
         best = group.sort_values(["f1", "budget"], ascending=[False, True]).iloc[0]
         selected[model] = int(best.budget)
     return selected
+
+
+def select_external_budget_ratio(cache, models, neural_distance, rl_models,
+                                 ratios, tolerance, device):
+    """Select one shared length-relative budget using ABC validation only."""
+    rows = []
+    for piece, item in sorted(cache.items()):
+        gt = [end for _, end, _ in item["segments"][:-1]]
+        candidate_count = max(1, len(item["matrix"]) - 1)
+        for model in models:
+            tree, _ = build_tree(model, item, neural_distance, rl_models, device)
+            for ratio in ratios:
+                budget = min(candidate_count, max(1, int(round(ratio * candidate_count))))
+                score = boundary_scores(
+                    collect_prominent_splits(tree, budget), gt,
+                    float(item.get("bin_size_qb", tolerance)))
+                rows.append({
+                    "piece": piece, "work": item["work"], "model": model,
+                    "ratio": float(ratio), "f1": score["f1"],
+                })
+    frame = pd.DataFrame(rows)
+    work = frame.groupby(["ratio", "model", "work"], as_index=False).f1.mean()
+    summary = (work.groupby("ratio", as_index=False).f1.mean()
+               .sort_values(["f1", "ratio"], ascending=[False, True]))
+    return float(summary.iloc[0].ratio), summary
 
 
 def aggregate_selected(frame, selected, seed):
@@ -636,7 +774,9 @@ def main():
     # test harmonies are deliberately not parsed until every seed is frozen.
     for split in ("train", "validation"):
         split_pairs = splits[split]
-        caches[split], current = load_cache(split_pairs, args.bin_size, args.max_bins)
+        caches[split], current = load_resolution_cache(
+            split_pairs, args.bin_sizes, args.max_bins,
+            all_resolutions=(split == "train"))
         record_access("annotations_loaded", split=split)
         status_rows.extend({"split": split, **row} for row in current)
         projection_rows.extend(boundary_projection_audit(
@@ -662,6 +802,32 @@ def main():
     trained_runs = []
     for seed in args.seeds:
         print(f"\n=== seed {seed} on {device} ===")
+        checkpoint_path = args.output_dir / f"checkpoint_seed_{seed}.pt"
+        metric_history_path = args.output_dir / f"metric_training_seed_{seed}.csv"
+        rl_history_path = args.output_dir / f"rl_training_seed_{seed}.csv"
+        if args.resume and checkpoint_path.exists():
+            saved = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            metric, neural_distance, rl_models = restore_checkpoint_models(
+                saved, device)
+            metric_history = (pd.read_csv(metric_history_path)
+                              if metric_history_path.exists() else pd.DataFrame())
+            rl_history = (pd.read_csv(rl_history_path)
+                          if rl_history_path.exists() else pd.DataFrame())
+            if not metric_history.empty:
+                metric_histories.append(metric_history)
+            if not rl_history.empty:
+                rl_histories.append(rl_history)
+            trained_runs.append({
+                "seed": seed, "metric": metric, "neural_distance": neural_distance,
+                "rl_models": rl_models, "budgets": saved["selected_budgets"],
+                "external_budget_ratio": saved.get("external_budget_ratio"),
+            })
+            model_records[str(seed)] = saved.get("selection", {
+                "selected_budgets": saved["selected_budgets"]})
+            completed_seeds.append(seed)
+            record_access("checkpoint_resumed", seed=seed)
+            write_experiment_state("training")
+            continue
         metric, metric_history, metric_info = train_metric(
             train_examples, validation_examples, args, seed, device)
         pretrained_encoder = copy.deepcopy(metric.encoder).to(device)
@@ -675,6 +841,9 @@ def main():
             args, seed, device, joint=True)
         metric_histories.append(metric_history)
         rl_histories.extend([imitation_history, frozen_history, joint_history])
+        metric_history.to_csv(metric_history_path, index=False)
+        pd.concat([imitation_history, frozen_history, joint_history],
+                  ignore_index=True).to_csv(rl_history_path, index=False)
 
         neural_distance = NeuralEmbeddingDistance(metric.encoder, device)
         rl_models = {
@@ -682,18 +851,37 @@ def main():
             "rl_joint": (joint_encoder, joint_policy),
         }
         validation, _, _ = evaluate_cache(
-            caches["validation"], MODELS, neural_distance, rl_models,
+            caches["validation"], EXTERNAL_MODELS, neural_distance, rl_models,
             args.budgets, args.tolerance, device)
         budgets = select_budgets(validation)
+        external_ratio, external_ratio_summary = select_external_budget_ratio(
+            caches["validation"], MODELS, neural_distance, rl_models,
+            args.external_budget_ratios, args.tolerance, device)
+        external_ratio_summary.insert(0, "seed", seed)
+        external_ratio_summary.to_csv(
+            args.output_dir / f"external_budget_selection_seed_{seed}.csv",
+            index=False)
         checkpoint = {
             "seed": seed, "metric": state_dict_cpu(metric),
+            "encoder_config": metric.encoder.architecture_config(),
             "rl_frozen_encoder": state_dict_cpu(frozen_encoder),
             "rl_frozen_policy": state_dict_cpu(frozen_policy),
             "rl_joint_encoder": state_dict_cpu(joint_encoder),
             "rl_joint_policy": state_dict_cpu(joint_policy),
             "selected_budgets": budgets,
+            "external_budget_ratio": external_ratio,
+            "selection": {
+                "metric": metric_info, "rl_frozen": frozen_info,
+                "rl_joint": joint_info, "selected_budgets": budgets,
+                "external_budget_ratio": external_ratio,
+            },
         }
-        torch.save(checkpoint, args.output_dir / f"checkpoint_seed_{seed}.pt")
+        torch.save(checkpoint, checkpoint_path)
+        # Formal evaluation always uses freshly rehydrated checkpoint objects,
+        # never mutable in-memory training objects.
+        metric, neural_distance, rl_models = restore_checkpoint_models(
+            torch.load(checkpoint_path, map_location=device, weights_only=False),
+            device)
         record_access("checkpoint_and_budgets_frozen", seed=seed)
         model_records[str(seed)] = {
             "metric": metric_info, "rl_frozen": frozen_info,
@@ -702,6 +890,7 @@ def main():
         trained_runs.append({
             "seed": seed, "metric": metric, "neural_distance": neural_distance,
             "rl_models": rl_models, "budgets": budgets,
+            "external_budget_ratio": external_ratio,
         })
         completed_seeds.append(seed)
         write_experiment_state("training")
@@ -711,8 +900,8 @@ def main():
     record_access("all_checkpoints_and_budgets_frozen")
     write_experiment_state("all_checkpoints_and_budgets_frozen")
     record_access("held_out_phase_started", split="test")
-    caches["test"], current = load_cache(
-        splits["test"], args.bin_size, args.max_bins)
+    caches["test"], current = load_resolution_cache(
+        splits["test"], args.bin_sizes, args.max_bins, all_resolutions=False)
     record_access("annotations_loaded", split="test")
     status_rows.extend({"split": "test", **row} for row in current)
     pd.DataFrame(status_rows).to_csv(args.output_dir / "run_status.csv", index=False)
@@ -763,6 +952,7 @@ def main():
     plot_histories(metric_history, rl_history, args.output_dir)
     config = {
         "method_scope": "Advanced extension: learned proxy, not a true expert hierarchy",
+        "encoder_architecture": trained_runs[0]["metric"].encoder.architecture_config(),
         "test_access_policy": "Test annotations loaded only after all seed checkpoints and budgets were frozen",
         "rl_validation_aggregation": "movement AP averaged within work, then macro-averaged across works",
         "held_out_seed_aggregation": "work-macro metrics computed per seed before mean/std across seeds",
@@ -771,7 +961,13 @@ def main():
         "split_seed": args.split_seed, "splits": split_names,
         "model_seeds": args.seeds, "device": str(device),
         "contexts": args.contexts, "budgets": args.budgets,
-        "bin_size_qb": args.bin_size, "tolerance_qb": args.tolerance,
+        "external_budget_ratios": args.external_budget_ratios,
+        "external_budget_policy": (
+            "one ratio shared by all methods and selected on ABC validation only"),
+        "training_bin_sizes_qb": args.bin_sizes,
+        "inference_resolution_policy": (
+            f"finest of {args.bin_sizes} producing <= {args.max_bins} leaves"),
+        "tolerance_policy": "one selected temporal bin",
         "training_examples": len(train_examples), "models": model_records,
         "quick": args.quick,
     }

@@ -4,3 +4,4 @@ matplotlib>=3.7,<3.10
 zss>=1.2,<2
 torch>=2.0,<2.9
 pytest>=7,<9
+music21>=8.3,<9
