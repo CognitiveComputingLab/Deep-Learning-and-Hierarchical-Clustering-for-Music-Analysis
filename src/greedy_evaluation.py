@@ -143,17 +143,73 @@ def boundary_salience(root,contrast=None):
     return sorted(rows,key=lambda row:(-row['salience'],-row['lca_leaf_count'],
                                        row['boundary_qb'],row['boundary_index']))
 
-def collect_salient_splits(root,contrast=None,*,threshold=None,budget=None):
-    '''Select variable-count threshold boundaries or an equal fixed budget.'''
+def _salience_rank_key(row):
+    '''Stable best-first ordering for boundary selection.'''
+    return (-float(row['salience']),float(row['boundary_qb']),
+            int(row.get('boundary_index',0)))
+
+def _local_salience_maxima(rows,radius_qb):
+    '''Retain deterministic salience maxima within a temporal radius.'''
+    ranked=sorted(rows,key=_salience_rank_key); selected=[]
+    for row in ranked:
+        boundary=float(row['boundary_qb'])
+        neighbours=[other for other in rows
+                    if abs(boundary-float(other['boundary_qb']))<=radius_qb]
+        if row is min(neighbours,key=_salience_rank_key):
+            selected.append(row)
+    return selected
+
+def _suppress_nearby_splits(rows,min_separation_qb):
+    '''Deterministic salience-descending one-dimensional NMS.
+
+    Boundaries exactly ``min_separation_qb`` apart are allowed; a lower-ranked
+    candidate is suppressed only when it is strictly closer to a retained one.
+    '''
+    selected=[]
+    for row in sorted(rows,key=_salience_rank_key):
+        boundary=float(row['boundary_qb'])
+        if all(abs(boundary-float(kept['boundary_qb']))>=min_separation_qb
+               for kept in selected):
+            selected.append(row)
+    return selected
+
+def collect_salient_splits(root,contrast=None,*,threshold=None,budget=None,
+                           min_separation_qb=0.0,local_max_radius_qb=0.0):
+    '''Select threshold or fixed-budget boundaries, optionally peak-picked.
+
+    Selection order is: compute salience, optionally retain local maxima,
+    apply the threshold (threshold mode), perform salience-descending NMS, and
+    finally truncate to the requested budget (budget mode). Consequently NMS
+    can return fewer than ``budget`` candidates when the separation constraint
+    makes that unavoidable. With both radius options at zero this exactly
+    preserves the legacy selection behaviour.
+    '''
     if (threshold is None)==(budget is None):
         raise ValueError('specify exactly one of threshold or budget')
+    min_separation_qb=float(min_separation_qb)
+    local_max_radius_qb=float(local_max_radius_qb)
+    if not np.isfinite(min_separation_qb) or min_separation_qb<0:
+        raise ValueError('min_separation_qb must be a finite non-negative value')
+    if not np.isfinite(local_max_radius_qb) or local_max_radius_qb<0:
+        raise ValueError('local_max_radius_qb must be a finite non-negative value')
     rows=boundary_salience(root,contrast)
+    if min_separation_qb==0 and local_max_radius_qb==0:
+        if threshold is not None:
+            threshold=float(threshold)
+            if not 0<=threshold<=1: raise ValueError('threshold must lie in [0,1]')
+            selected=[row for row in rows if row['salience']>=threshold]
+        else:
+            selected=rows[:max(0,int(budget))]
+        return sorted(row['boundary_qb'] for row in selected)
+    if local_max_radius_qb>0:
+        rows=_local_salience_maxima(rows,local_max_radius_qb)
     if threshold is not None:
         threshold=float(threshold)
         if not 0<=threshold<=1: raise ValueError('threshold must lie in [0,1]')
-        selected=[row for row in rows if row['salience']>=threshold]
+        rows=[row for row in rows if row['salience']>=threshold]
+        selected=_suppress_nearby_splits(rows,min_separation_qb)
     else:
-        selected=rows[:max(0,int(budget))]
+        selected=_suppress_nearby_splits(rows,min_separation_qb)[:max(0,int(budget))]
     return sorted(row['boundary_qb'] for row in selected)
 
 def tree_shape_diagnostics(root):

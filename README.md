@@ -16,6 +16,33 @@ TED is auxiliary. It measures discrepancy between a predicted hierarchy and a **
 
 Distances are Euclidean, tonic-relative weighted chromagram, a two-dimensional circle-of-fifths embedding inspired by Tonnetz geometry, and 24-dimensional key-profile activation. The fixed C-major weighting is available only as an explicitly named ablation. Balanced and random adjacent-merge trees are structural baselines.
 
+## Shared structural corpora
+
+The tutor-proposed corpora now share a versioned, loss-aware format:
+
+```powershell
+git submodule update --init --recursive
+python scripts\convert_shared_datasets.py
+```
+
+The local audit converts 269/269 discovered files with zero failures,
+including 152 pieces with explicit source hierarchies. The 70 ABC movements
+and 24 Winterreise songs are score-aligned for the pitch-class Greedy/DP
+pipeline; Taking Form and Algomus still need exact-edition alignment. Flat partitions, overlapping
+motifs, and point events are preserved rather than coerced into trees. See
+`SHARED_DATASETS.md` for mappings and validity rules.
+
+Taking Form hierarchies can now be aligned to official DCML sonata timelines
+and evaluated separately:
+
+```powershell
+python scripts\align_taking_form_scores.py
+python scripts\evaluate_shared_hierarchy_stage.py --dataset mozart
+```
+
+The audit accepts 89/120 movements (17 Mozart and 72 Beethoven) and explicitly
+rejects missing or edition-incompatible scores.
+
 ## Reproduce
 
 ```powershell
@@ -184,6 +211,70 @@ comparisons.
 
 Precision-recall plots contain tolerance/depth operating points; they are not confidence-threshold PR curves. Generated results are ignored by git and are reproducible from the command above.
 
+## Dissertation pipeline and frozen evidence audit
+
+The complete Basic/Intermediate/Advanced comparison now has one entry point:
+
+```powershell
+# Fast integration run; its audit is deliberately marked non-final.
+python scripts/run_dissertation_experiments.py --quick `
+  --output-dir results/dissertation_quick
+
+# Full preregistered 70-movement / 16-work run.
+python scripts/run_dissertation_experiments.py `
+  --output-dir results/dissertation_main
+```
+
+The pipeline first freezes `data_manifest.csv` with SHA-256 hashes, records the
+Python/PyTorch/CUDA environment and every command, then runs Greedy, exact DP,
+and temporal Siamese-distance experiments. The last stage is read-only:
+`audit_dissertation_results.py` checks the common work scope, grouped outer
+folds, absence of held-out-work leakage, successful run status, and
+`DP objective >= Greedy objective`. It writes:
+
+- `final_evidence/three_stage_comparison.csv`, containing the directly
+  traceable Basic/Intermediate/Advanced comparison from one nested evaluator
+  and one validation-selected threshold protocol;
+- `final_evidence/legacy_fixed_depth_diagnostics.csv`, retaining standalone
+  fixed-depth Greedy/DP results without mixing them into the primary table;
+- `final_evidence/final_audit.json`, whose `ready_for_dissertation` flag is
+  true only for complete, comparable 16-work evidence;
+- `final_evidence/results_narrative.md`, a concise table and the required
+  optimality/ground-truth qualifications.
+
+Use `--resume` to continue an interrupted pipeline. The Advanced evaluator
+commits checksum-validated outer-work shards, so a Colab interruption only
+recomputes the in-progress work. `--aggregate-only` validates and rebuilds
+the root results from complete shards without training. See
+`ADVANCED_STAGE.md` for the Linux/Colab commands. Never use a Quick or
+single-work result for the dissertation's main accuracy claim, even if its F1
+is higher.
+
 ## Validity limits
+
+### Genuine Taking Form hierarchy evaluation
+
+Run the aligned hierarchy experiment with:
+
+    python scripts/evaluate_shared_hierarchy_stage.py --dataset mozart --output-dir results/shared_hierarchy_stage_mozart_tree
+
+tree_measure_summary.csv reports reduced and full T-measures following McFee,
+Nieto, and Bello (ISMIR 2015). The implementation compares LCA rank orderings
+at the clustering input-bin centres and allows reference and estimated trees
+to have unequal depth. equal_budget_summary.csv gives the easier-to-interpret
+per-level Boundary F1 diagnostic. Confidence intervals and work-blocked paired
+tests are written separately. The legacy validation-selected fixed-depth
+Boundary F1 remains a sensitivity analysis, and flat-tree TED is deliberately
+not used for this genuine hierarchy.
+
+The trained Intermediate-stage hierarchy experiment is documented in
+PARAMETRIC_HIERARCHY_STAGE.md. It learns a non-negative calibrated mixture of
+Euclidean, circle-of-fifths, and key-profile representations on one composer,
+selects the boundary-aware DP objective on training works only, and evaluates
+on the other composer. In both cross-composer directions exact DP has higher
+mean held-out Full T-measure than the matched Greedy search; the
+Beethoven-to-Mozart difference is significant under the work-blocked paired
+test. This replaces the earlier conclusion drawn from an objective that was
+not trained to represent the expert form hierarchy.
 
 Local-key change is not equivalent to phrase, cadence, section, or complete musical-form hierarchy. Large tolerances can overstate boundary recovery; pruning aligns approximate scale rather than semantic level. Pitch-class centroids lose distributional information, and global-key estimation can be uncertain. Corpus-level uncertainty and parameter sensitivity must accompany method comparisons.

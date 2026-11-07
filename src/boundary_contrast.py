@@ -90,6 +90,17 @@ def boundary_contrast_features(
     result = np.zeros((max(0, len(matrix) - 1), len(names)), dtype=float)
     column = 0
     for name in distances:
+        temporal_contrast = getattr(
+            distance_specs[name], "boundary_contrast_batch", None)
+        if temporal_contrast is not None:
+            values = np.asarray(temporal_contrast(matrix, contexts), dtype=float)
+            expected = (max(0, len(matrix) - 1), len(contexts))
+            if values.shape != expected or not np.all(np.isfinite(values)):
+                raise ValueError(
+                    "boundary_contrast_batch must return finite (n-1, contexts) values")
+            result[:, column:column + len(contexts)] = values
+            column += len(contexts)
+            continue
         transform = getattr(distance_specs[name], "transform_batch", None)
         if transform is None:
             raise TypeError(f"distance specification {name!r} has no transform_batch()")
@@ -213,12 +224,157 @@ class BoundaryContrastScorer:
 
 
 @dataclass(frozen=True)
+class ProbabilityCalibrator:
+    """Monotone scalar logistic calibration for boundary probabilities."""
+
+    intercept: float
+    slope: float
+    score_location: float
+    score_scale: float
+    epsilon: float = 1e-6
+    fit_scope: str = "training_works_all_nonignored_candidates"
+
+    def __post_init__(self) -> None:
+        values = (self.intercept, self.slope, self.score_location,
+                  self.score_scale, self.epsilon)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("calibrator parameters must be finite")
+        if self.slope < 0 or self.score_scale <= 0:
+            raise ValueError("calibrator slope must be non-negative and scale positive")
+        if not 0 < self.epsilon < 0.5:
+            raise ValueError("epsilon must lie strictly between zero and one half")
+
+    def transform(self, scores: Sequence[float] | np.ndarray) -> np.ndarray:
+        """Calibrate scores without fitting state from the prediction set."""
+        scores = np.asarray(scores, dtype=float)
+        if not np.all(np.isfinite(scores)) or np.any((scores < 0) | (scores > 1)):
+            raise ValueError("scores must be finite probabilities in [0, 1]")
+        clipped = np.clip(scores, self.epsilon, 1.0 - self.epsilon)
+        log_odds = np.log(clipped) - np.log1p(-clipped)
+        feature = (log_odds - self.score_location) / self.score_scale
+        return _sigmoid(self.intercept + self.slope * feature)
+
+    score = transform
+    predict_proba = transform
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "method": "monotone scalar logistic calibration on score log-odds",
+            "intercept": float(self.intercept), "slope": float(self.slope),
+            "score_location": float(self.score_location),
+            "score_scale": float(self.score_scale), "epsilon": float(self.epsilon),
+            "fit_scope": self.fit_scope,
+        }
+
+
+def _fit_monotone_logistic(design, labels, weights, regularization,
+                           max_iter, tolerance):
+    prevalence = float(np.sum(weights * labels))
+    parameters = np.array([np.log(prevalence) - np.log1p(-prevalence), 0.0])
+
+    def objective(candidate):
+        probability = _sigmoid(design @ candidate)
+        tiny = 1e-12
+        loss = -np.sum(weights * (labels * np.log(probability + tiny)
+                       + (1.0 - labels) * np.log(1.0 - probability + tiny)))
+        return float(loss + 0.5 * regularization * candidate[1] ** 2)
+
+    current = objective(parameters)
+    for _ in range(max_iter):
+        probability = _sigmoid(design @ parameters)
+        residual = weights * (probability - labels)
+        gradient = design.T @ residual
+        gradient[1] += regularization * parameters[1]
+        curvature = weights * probability * (1.0 - probability)
+        hessian = design.T @ (curvature[:, None] * design)
+        hessian[1, 1] += regularization
+        hessian += np.eye(2) * 1e-12
+        try:
+            step = np.linalg.solve(hessian, gradient)
+        except np.linalg.LinAlgError:
+            step = np.linalg.pinv(hessian) @ gradient
+        if float(np.linalg.norm(step, ord=np.inf)) <= tolerance:
+            break
+        multiplier, accepted, change = 1.0, False, np.inf
+        while multiplier >= 2.0 ** -20:
+            candidate = parameters - multiplier * step
+            candidate[1] = max(0.0, float(candidate[1]))
+            candidate_objective = objective(candidate)
+            if candidate_objective <= current + 1e-14:
+                change = abs(current - candidate_objective)
+                parameters, current = candidate, candidate_objective
+                accepted = True
+                break
+            multiplier *= 0.5
+        if not accepted or change <= tolerance:
+            break
+    return parameters
+
+
+def fit_probability_calibrator(
+    scores: Sequence[float] | np.ndarray,
+    labels: Sequence[int] | np.ndarray,
+    sample_weights: Sequence[float] | np.ndarray | None = None,
+    *,
+    regularization: float = 1e-4,
+    max_iter: int = 100,
+    tolerance: float = 1e-10,
+    epsilon: float = 1e-6,
+) -> ProbabilityCalibrator:
+    """Fit deterministic Platt-style calibration on training candidates.
+
+    Pass all eligible candidates from the current training works with their
+    natural boundary prevalence, not the class-balanced hard-negative subset.
+    Inner-validation and outer-test labels must never be supplied here.
+    """
+    scores = np.asarray(scores, dtype=float)
+    labels = np.asarray(labels, dtype=float)
+    if scores.ndim != 1 or labels.shape != scores.shape or not len(scores):
+        raise ValueError("scores and labels must be aligned non-empty vectors")
+    if not np.all(np.isfinite(scores)) or np.any((scores < 0) | (scores > 1)):
+        raise ValueError("scores must be finite probabilities in [0, 1]")
+    if (not np.all(np.isfinite(labels))
+            or not set(np.unique(labels)).issubset({0.0, 1.0})):
+        raise ValueError("labels must contain only zero and one")
+    if sample_weights is None:
+        weights = np.ones(len(scores), dtype=float)
+    else:
+        weights = np.asarray(sample_weights, dtype=float)
+        if weights.shape != scores.shape:
+            raise ValueError("sample_weights must align with scores")
+    if (not np.all(np.isfinite(weights)) or np.any(weights < 0)
+            or float(weights.sum()) <= 0):
+        raise ValueError("sample_weights must be finite, non-negative and non-zero")
+    if regularization < 0 or max_iter < 1 or tolerance <= 0:
+        raise ValueError("invalid calibrator optimisation settings")
+    if not 0 < epsilon < 0.5:
+        raise ValueError("epsilon must lie strictly between zero and one half")
+    class_mass = [weights[labels == value].sum() for value in (0.0, 1.0)]
+    if any(value <= 0 for value in class_mass):
+        raise ValueError("calibration requires positive-weight examples of both classes")
+
+    weights = weights / float(weights.sum())
+    clipped = np.clip(scores, epsilon, 1.0 - epsilon)
+    log_odds = np.log(clipped) - np.log1p(-clipped)
+    location = float(np.sum(weights * log_odds))
+    variance = float(np.sum(weights * (log_odds - location) ** 2))
+    scale = max(float(np.sqrt(variance)), 1e-8)
+    design = np.column_stack((np.ones(len(scores)), (log_odds - location) / scale))
+    parameters = _fit_monotone_logistic(
+        design, labels, weights, regularization, max_iter, tolerance)
+    return ProbabilityCalibrator(
+        intercept=float(parameters[0]), slope=float(parameters[1]),
+        score_location=location, score_scale=scale, epsilon=epsilon)
+
+
+@dataclass(frozen=True)
 class SupervisedContrastExample:
     work: str
     piece: str
     split_index: int
     features: np.ndarray
     label: int
+    ignored: bool = False
 
 
 def bounds_to_edges(bounds: Sequence[float], n_bins: int | None = None) -> np.ndarray:
@@ -249,16 +405,49 @@ def nearest_boundary_labels(bounds: Sequence[float], reference_qb: Sequence[floa
     return labels
 
 
+def tolerance_aware_boundary_labels(
+    bounds: Sequence[float],
+    reference_qb: Sequence[float],
+    n_bins: int,
+    *,
+    ignore_tolerance_qb: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return nearest-positive labels and ambiguous-neighbour ignore mask."""
+    if not np.isfinite(ignore_tolerance_qb) or ignore_tolerance_qb < 0:
+        raise ValueError("ignore_tolerance_qb must be finite and non-negative")
+    edges = bounds_to_edges(bounds, n_bins)
+    internal = edges[1:-1]
+    references = np.asarray(
+        sorted(set(float(value) for value in reference_qb)), dtype=float)
+    if not np.all(np.isfinite(references)):
+        raise ValueError("reference boundaries must be finite")
+    labels = np.zeros(max(0, n_bins - 1), dtype=int)
+    for boundary in references:
+        if len(internal):
+            labels[int(np.argmin(np.abs(internal - boundary)))] = 1
+    ignored = np.zeros_like(labels, dtype=bool)
+    if ignore_tolerance_qb > 0 and len(internal) and len(references):
+        distance = np.min(
+            np.abs(internal[:, None] - references[None, :]), axis=1)
+        ignored = (distance <= ignore_tolerance_qb) & (labels == 0)
+    return labels, ignored
+
+
 def make_supervised_examples(
     pieces: Sequence[Mapping[str, Any]],
     scaler: RobustContrastScaler,
+    *,
+    ignore_tolerance_qb: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
     """Return work-balanced positives and deterministic hard negatives.
 
     Each input mapping supplies ``work``, ``piece``, ``features``, ``bounds``
-    and ``reference``.  For every work all positives are retained; the same
-    number of negatives with the largest unsupervised contrast are selected.
+    and ``reference``. For every work all positives are retained; up to the
+    same number of negatives with the largest unsupervised contrast are selected.
     Sample weights make each class within each work contribute one half.
+    Non-positive candidates within ``ignore_tolerance_qb`` of an annotation
+    are audited but excluded from hard-negative sampling. Zero preserves the
+    legacy training-array behaviour.
     """
     rows: list[SupervisedContrastExample] = []
     calibrated_by_piece: dict[str, np.ndarray] = {}
@@ -266,17 +455,21 @@ def make_supervised_examples(
         features = item["features"]
         if not isinstance(features, BoundaryFeatureMatrix):
             raise TypeError("features must be BoundaryFeatureMatrix instances")
-        labels = nearest_boundary_labels(item["bounds"], item["reference"], len(features.values) + 1)
+        labels, ignored = tolerance_aware_boundary_labels(
+            item["bounds"], item["reference"], len(features.values) + 1,
+            ignore_tolerance_qb=ignore_tolerance_qb)
         calibrated_by_piece[str(item["piece"])] = scaler.transform(features)
-        for split_index, (vector, label) in enumerate(zip(features.values, labels), 1):
+        for split_index, (vector, label, is_ignored) in enumerate(
+                zip(features.values, labels, ignored), 1):
             rows.append(SupervisedContrastExample(
                 str(item["work"]), str(item["piece"]), split_index,
-                np.asarray(vector, dtype=float), int(label)))
+                np.asarray(vector, dtype=float), int(label), bool(is_ignored)))
 
     selected: list[SupervisedContrastExample] = []
     for work in sorted({row.work for row in rows}):
         positives = [row for row in rows if row.work == work and row.label == 1]
-        negatives = [row for row in rows if row.work == work and row.label == 0]
+        negatives = [row for row in rows
+                     if row.work == work and row.label == 0 and not row.ignored]
         count = min(len(positives), len(negatives))
         if not count:
             continue
@@ -303,10 +496,48 @@ def make_supervised_examples(
             if indices:
                 sample_weights[indices] = 0.5 / len(indices)
     sample_weights /= sample_weights.sum()
-    audit = [{
-        "work": row.work, "piece": row.piece, "split_index": row.split_index,
-        "label": row.label, "sample_weight": float(sample_weights[index]),
-    } for index, row in enumerate(selected)]
+    selected_indices = {
+        (row.work, row.piece, row.split_index): index
+        for index, row in enumerate(selected)
+    }
+    work_counts = {}
+    for work in sorted({row.work for row in rows}):
+        work_counts[work] = {
+            "work_positive_count": sum(
+                row.label == 1 for row in rows if row.work == work),
+            "work_eligible_negative_count": sum(
+                row.label == 0 and not row.ignored
+                for row in rows if row.work == work),
+            "work_selected_negative_count": sum(
+                row.work == work and row.label == 0 for row in selected),
+        }
+    audit = []
+    for row in sorted(rows, key=lambda value: (
+            value.work, value.piece, value.split_index)):
+        key = (row.work, row.piece, row.split_index)
+        selected_index = selected_indices.get(key)
+        is_selected = selected_index is not None
+        if row.ignored:
+            status = "ignored_tolerance"
+        elif row.label == 1 and is_selected:
+            status = "selected_positive"
+        elif row.label == 1:
+            status = "unselected_positive_no_balanced_work"
+        elif is_selected:
+            status = "selected_hard_negative"
+        else:
+            status = "unselected_negative"
+        audit.append({
+            "work": row.work, "piece": row.piece,
+            "split_index": row.split_index,
+            "label": None if row.ignored else row.label,
+            "selected": is_selected, "ignored": row.ignored,
+            "status": status,
+            "sample_weight": (float(sample_weights[selected_index])
+                              if is_selected else 0.0),
+            "ignore_tolerance_qb": float(ignore_tolerance_qb),
+            **work_counts[row.work],
+        })
     return calibrated, labels, sample_weights, audit
 
 

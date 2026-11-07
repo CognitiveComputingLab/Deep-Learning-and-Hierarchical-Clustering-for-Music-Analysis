@@ -1,4 +1,5 @@
 from functools import lru_cache
+import json
 from pathlib import Path
 import sys
 
@@ -11,11 +12,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from boundary_contrast import (
     BoundaryContrastScorer,
+    ProbabilityCalibrator,
     RobustContrastScaler,
     boundary_contrast_features,
+    fit_probability_calibrator,
     fit_supervised_scorer,
     make_supervised_examples,
     nearest_boundary_labels,
+    tolerance_aware_boundary_labels,
 )
 from greedy_clustering import ClusterNode, distance_specs
 from greedy_evaluation import boundary_salience, collect_salient_splits
@@ -84,6 +88,7 @@ def test_supervised_scorer_is_nonnegative_deterministic_and_work_balanced():
     assert sample_weights.sum() == pytest.approx(1)
     assert sum(row["sample_weight"] for row in audit) == pytest.approx(1)
     assert {row["work"] for row in audit} == {"w1", "w2"}
+    assert sum(row["selected"] for row in audit) == len(labels)
     first, history_a = fit_supervised_scorer(
         scaler, calibrated, labels, sample_weights, epochs=50)
     second, history_b = fit_supervised_scorer(
@@ -99,6 +104,77 @@ def test_nearest_annotation_mapping_collapses_duplicates_stably():
     labels = nearest_boundary_labels(
         np.arange(6, dtype=float), [1.4, 1.49, 4.1], n_bins=5)
     assert labels.tolist() == [1, 0, 0, 1]
+
+
+def test_tolerance_aware_training_ignores_near_gt_candidates():
+    matrix = np.zeros((6, 12))
+    matrix[:3, 0] = 1
+    matrix[3:, 7] = 1
+    specs, _ = distance_specs(matrix.sum(0))
+    features = boundary_contrast_features(matrix, specs, contexts=[1, 2])
+    item = {
+        "work": "w1", "piece": "w1_01", "features": features,
+        "bounds": np.arange(7, dtype=float), "reference": [3.1],
+    }
+    scaler = RobustContrastScaler.fit([features])
+    nearest, ignored = tolerance_aware_boundary_labels(
+        item["bounds"], item["reference"], 6, ignore_tolerance_qb=1.1)
+    assert nearest.tolist() == [0, 0, 1, 0, 0]
+    assert ignored.tolist() == [False, True, False, True, False]
+
+    calibrated, labels, weights, audit = make_supervised_examples(
+        [item], scaler, ignore_tolerance_qb=1.1)
+    assert calibrated.shape[0] == len(labels) == len(weights) == 2
+    assert labels.tolist() == [1.0, 0.0]
+    by_split = {row["split_index"]: row for row in audit}
+    assert by_split[3]["status"] == "selected_positive"
+    assert by_split[3]["selected"] and not by_split[3]["ignored"]
+    for split in (2, 4):
+        row = by_split[split]
+        assert row["status"] == "ignored_tolerance"
+        assert row["ignored"] and not row["selected"]
+        assert row["label"] is None and row["sample_weight"] == 0.0
+
+
+def test_zero_ignore_tolerance_preserves_legacy_training_arrays():
+    matrix = np.eye(6, 12)
+    specs, _ = distance_specs(matrix.sum(0))
+    features = boundary_contrast_features(matrix, specs, contexts=[1])
+    item = {"work": "w", "piece": "w_01", "features": features,
+            "bounds": np.arange(7, dtype=float), "reference": [3.0]}
+    scaler = RobustContrastScaler.fit([features])
+    implicit = make_supervised_examples([item], scaler)
+    explicit = make_supervised_examples(
+        [item], scaler, ignore_tolerance_qb=0.0)
+    for left, right in zip(implicit[:3], explicit[:3]):
+        assert np.array_equal(left, right)
+    assert implicit[3] == explicit[3]
+    assert not any(row["ignored"] for row in implicit[3])
+
+
+def test_probability_calibration_is_deterministic_monotone_and_serialisable():
+    scores = np.array([0.05, 0.15, 0.25, 0.35, 0.55, 0.65, 0.8, 0.9])
+    labels = np.array([0, 0, 0, 1, 0, 1, 1, 1])
+    first = fit_probability_calibrator(scores, labels)
+    second = fit_probability_calibrator(scores, labels)
+    assert isinstance(first, ProbabilityCalibrator)
+    assert first == second
+    calibrated = first.transform(scores)
+    assert np.isfinite(calibrated).all()
+    assert np.all((0 < calibrated) & (calibrated < 1))
+    assert np.all(np.diff(calibrated) >= 0)
+    assert np.allclose(first.score(scores), calibrated)
+    assert np.allclose(first.predict_proba(scores), calibrated)
+    payload = first.as_dict()
+    assert payload["fit_scope"] == "training_works_all_nonignored_candidates"
+    assert json.loads(json.dumps(payload))["slope"] == pytest.approx(first.slope)
+
+
+def test_probability_calibration_rejects_missing_class_and_bad_scores():
+    with pytest.raises(ValueError, match="both classes"):
+        fit_probability_calibrator([0.1, 0.2], [0, 0])
+    with pytest.raises(ValueError, match=r"in \[0, 1\]"):
+        fit_probability_calibrator([0.1, 1.2], [0, 1])
 
 
 def brute_boundary_objective(affinity, contrast, weight, balance=0.0):

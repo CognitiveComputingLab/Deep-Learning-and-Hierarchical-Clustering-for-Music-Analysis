@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -22,10 +23,13 @@ sys.path.insert(0, str(ROOT / "src"))
 from boundary_contrast import (
     DEFAULT_CONTEXTS,
     BoundaryContrastScorer,
+    ProbabilityCalibrator,
     RobustContrastScaler,
     boundary_contrast_features,
+    fit_probability_calibrator,
     fit_supervised_scorer,
     make_supervised_examples,
+    tolerance_aware_boundary_labels,
 )
 from dp_clustering import assert_valid_ordered_binary_tree
 from greedy_clustering import ClusterNode, distance_specs, load_pc_bins
@@ -48,6 +52,7 @@ from ordered_affinity import (
 
 
 MODEL_MODES = ("similarity_only", "unsupervised_contrast", "supervised_contrast")
+SELECTION_METRICS = ("f1", "f0.5", "precision_at_recall_floor")
 
 
 def parse_args():
@@ -67,10 +72,37 @@ def parse_args():
                         default=[0, 0.1, 0.25, 0.5, 0.6, 1])
     parser.add_argument("--thresholds", nargs="+", type=float,
                         default=[value / 50 for value in range(51)])
+    parser.add_argument(
+        "--min-separations-qb", nargs="+", type=float, default=[0, 8, 16, 24],
+        help="validation grid for salience-descending boundary NMS; 0 disables NMS")
+    parser.add_argument(
+        "--local-max-radii-qb", nargs="+", type=float, default=[0, 8],
+        help="validation grid for local salience peak selection; 0 keeps all candidates")
     parser.add_argument("--boundary-budgets", nargs="+", type=int,
                         default=[3, 5, 8, 10, 12, 15, 20])
     parser.add_argument("--tolerances", nargs="+", type=float, default=[2, 4, 8, 12, 24])
     parser.add_argument("--selection-tolerance", type=float, default=8.0)
+    parser.add_argument(
+        "--selection-metric", choices=SELECTION_METRICS, default="f1",
+        help="inner-validation operating-point objective; F1 remains the default")
+    parser.add_argument(
+        "--recall-floor", type=float,
+        help=("absolute validation recall constraint for precision_at_recall_floor; "
+              "when omitted, use F1-selected recall minus --max-recall-drop"))
+    parser.add_argument(
+        "--max-recall-drop", type=float, default=0.05,
+        help="maximum recall loss from the F1-selected validation candidate")
+    parser.add_argument(
+        "--threshold-calibration", choices=["shared", "both"], default="shared",
+        help=("shared uses one threshold for Greedy/DP; both additionally reports "
+              "search-specific thresholds with the same selected tree objective"))
+    parser.add_argument(
+        "--ignore-tolerance-qb", type=float, default=None,
+        help=("exclude near-annotation candidates from supervised negatives; "
+              "default uses --selection-tolerance, while 0 is legacy"))
+    parser.add_argument(
+        "--probability-calibration", choices=["none", "platt"], default="platt",
+        help="training-work-only calibration; none preserves legacy scores")
     parser.add_argument("--inner-folds", type=int, default=3)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--learning-rate", type=float, default=0.05)
@@ -81,6 +113,20 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=20260731)
     parser.add_argument("--quick", action="store_true")
     return parser.parse_args()
+
+
+def f_beta(precision, recall, beta=0.5):
+    """Return a safe element-wise F-beta score."""
+    precision = np.asarray(precision, dtype=float)
+    recall = np.asarray(recall, dtype=float)
+    beta_squared = float(beta) ** 2
+    denominator = beta_squared * precision + recall
+    return np.divide(
+        (1.0 + beta_squared) * precision * recall,
+        denominator,
+        out=np.zeros_like(denominator, dtype=float),
+        where=denominator > 0,
+    )
 
 
 def work_id(piece):
@@ -151,6 +197,42 @@ def stable_inner_folds(works, folds, seed, outer_work):
             if len(chunk)]
 
 
+@dataclass(frozen=True)
+class ProbabilityCalibratedScorer:
+    """Apply a training-only probability calibrator to a base scorer."""
+
+    base: BoundaryContrastScorer
+    calibrator: ProbabilityCalibrator
+
+    @property
+    def scaler(self):
+        return self.base.scaler
+
+    @property
+    def weights(self):
+        return self.base.weights
+
+    @property
+    def mode(self):
+        return self.base.mode
+
+    @property
+    def intercept(self):
+        return self.base.intercept
+
+    @property
+    def gain(self):
+        return self.base.gain
+
+    def score(self, features):
+        return self.calibrator.transform(self.base.score(features))
+
+    def as_dict(self):
+        payload = self.base.as_dict()
+        payload["probability_calibration"] = self.calibrator.as_dict()
+        return payload
+
+
 def scorer_training_items(items):
     return [{
         "work": item["work"], "piece": item["piece"], "features": item["features"],
@@ -158,14 +240,85 @@ def scorer_training_items(items):
     } for item in items]
 
 
+def natural_calibration_examples(items, scorer, ignore_tolerance_qb):
+    """Return all non-ignored candidates with work-balanced natural priors."""
+    records = []
+    for item in sorted(items, key=lambda value: (
+            str(value["work"]), str(value["piece"]))):
+        features = item["features"]
+        scores = np.asarray(scorer.score(features), dtype=float)
+        labels, ignored = tolerance_aware_boundary_labels(
+            item["bounds"], item["reference"], len(scores) + 1,
+            ignore_tolerance_qb=ignore_tolerance_qb)
+        for split_index, (score, label, is_ignored) in enumerate(
+                zip(scores, labels, ignored), 1):
+            records.append({
+                "work": str(item["work"]), "piece": str(item["piece"]),
+                "split_index": split_index, "score": float(score),
+                "label": int(label), "ignored": bool(is_ignored),
+            })
+    counts = {}
+    for row in records:
+        if not row["ignored"]:
+            counts[row["work"]] = counts.get(row["work"], 0) + 1
+    if not counts:
+        raise ValueError("no non-ignored candidates available for calibration")
+    work_mass = 1.0 / len(counts)
+    scores, labels, weights, audit = [], [], [], []
+    for row in records:
+        eligible = not row["ignored"]
+        weight = work_mass / counts[row["work"]] if eligible else 0.0
+        audit.append({
+            "work": row["work"], "piece": row["piece"],
+            "split_index": row["split_index"],
+            "probability_calibration": "platt",
+            "calibration_eligible": eligible,
+            "calibration_sample_weight": float(weight),
+            "uncalibrated_probability": row["score"],
+        })
+        if eligible:
+            scores.append(row["score"])
+            labels.append(row["label"])
+            weights.append(weight)
+    return (np.asarray(scores, dtype=float), np.asarray(labels, dtype=float),
+            np.asarray(weights, dtype=float), audit)
+
+
 def fit_contrast_models(items, args):
     scaler = RobustContrastScaler.fit([item["features"] for item in items])
     unsupervised = BoundaryContrastScorer.unsupervised(scaler)
     calibrated, labels, sample_weights, audit = make_supervised_examples(
-        scorer_training_items(items), scaler)
+        scorer_training_items(items), scaler,
+        ignore_tolerance_qb=args.ignore_tolerance_qb)
     supervised, history = fit_supervised_scorer(
         scaler, calibrated, labels, sample_weights, epochs=args.epochs,
         learning_rate=args.learning_rate, regularization=args.regularization)
+    calibration_mode = getattr(args, "probability_calibration", "none")
+    if calibration_mode == "platt":
+        scores, natural_labels, natural_weights, calibration_audit = (
+            natural_calibration_examples(
+                items, supervised, args.ignore_tolerance_qb))
+        calibrator = fit_probability_calibrator(
+            scores, natural_labels, natural_weights)
+        supervised = ProbabilityCalibratedScorer(supervised, calibrator)
+        calibration_by_candidate = {
+            (row["work"], row["piece"], row["split_index"]): row
+            for row in calibration_audit
+        }
+        for row in audit:
+            row.update(calibration_by_candidate[
+                (row["work"], row["piece"], row["split_index"])])
+    elif calibration_mode == "none":
+        for row in audit:
+            row.update({
+                "probability_calibration": "none",
+                "calibration_eligible": False,
+                "calibration_sample_weight": 0.0,
+                "uncalibrated_probability": np.nan,
+            })
+    else:
+        raise ValueError(
+            "probability_calibration must be either 'platt' or 'none'")
     return {
         "unsupervised_contrast": unsupervised,
         "supervised_contrast": supervised,
@@ -218,25 +371,37 @@ def candidate_rows(items, mode, scorer, lambdas, balance_weights, args, fold_fie
                     "contrast_weight": float(contrast_weight),
                     "balance_weight": float(balance_weight),
                 }
-                for threshold in args.thresholds:
-                    predicted = collect_salient_splits(
-                        tree, contrast, threshold=threshold)
-                    score = boundary_scores(
-                        predicted, item["reference"], args.selection_tolerance)
-                    rows.append({
-                        **common, "selection_mode": "threshold",
-                        "candidate_value": float(threshold),
-                        **{key: score[key] for key in
-                           ["tp", "fp", "fn", "precision", "recall", "f1",
-                            "predicted_boundary_count", "gt_boundary_count"]},
-                    })
+                for min_separation in args.min_separations_qb:
+                    for local_max_radius in args.local_max_radii_qb:
+                        for threshold in args.thresholds:
+                            predicted = collect_salient_splits(
+                                tree, contrast, threshold=threshold,
+                                min_separation_qb=min_separation,
+                                local_max_radius_qb=local_max_radius)
+                            score = boundary_scores(
+                                predicted, item["reference"], args.selection_tolerance)
+                            rows.append({
+                                **common, "selection_mode": "threshold",
+                                "candidate_value": float(threshold),
+                                "min_separation_qb": float(min_separation),
+                                "local_max_radius_qb": float(local_max_radius),
+                                "f0.5": float(f_beta(score["precision"], score["recall"])),
+                                **{key: score[key] for key in
+                                   ["tp", "fp", "fn", "precision", "recall", "f1",
+                                    "predicted_boundary_count", "gt_boundary_count"]},
+                            })
                 for budget in args.boundary_budgets:
+                    # Fixed-budget rows deliberately disable peak/NMS filtering:
+                    # otherwise two searches need not return the same boundary count.
                     predicted = collect_salient_splits(tree, contrast, budget=budget)
                     score = boundary_scores(
                         predicted, item["reference"], args.selection_tolerance)
                     rows.append({
                         **common, "selection_mode": "fixed_budget",
                         "candidate_value": int(budget),
+                        "min_separation_qb": 0.0,
+                        "local_max_radius_qb": 0.0,
+                        "f0.5": float(f_beta(score["precision"], score["recall"])),
                         **{key: score[key] for key in
                            ["tp", "fp", "fn", "precision", "recall", "f1",
                             "predicted_boundary_count", "gt_boundary_count"]},
@@ -255,29 +420,107 @@ def candidate_rows(items, mode, scorer, lambdas, balance_weights, args, fold_fie
     return rows, diagnostics
 
 
-def select_candidate(frame, mode, selection_mode):
+def _sort_candidates(candidates, metric, selection_mode):
+    """Deterministically order validation candidates for one objective."""
+    candidate_ascending = selection_mode == "fixed_budget"
+    trailing = [
+        "candidate_value", "min_separation_qb", "local_max_radius_qb",
+        "balance_weight", "contrast_weight",
+    ]
+    if metric == "f1":
+        columns = ["f1", "recall", "precision"] + trailing
+        ascending = [False, False, False, candidate_ascending, True, True, True, True]
+    elif metric == "f0.5":
+        columns = ["f0.5", "precision", "recall", "f1"] + trailing
+        ascending = [False, False, False, False,
+                     candidate_ascending, True, True, True, True]
+    elif metric == "precision_at_recall_floor":
+        columns = ["precision", "recall", "f0.5", "f1"] + trailing
+        ascending = [False, False, False, False,
+                     candidate_ascending, True, True, True, True]
+    else:
+        raise ValueError(f"unknown selection metric: {metric}")
+    return candidates.sort_values(columns, ascending=ascending, kind="stable")
+
+
+def select_candidate(
+    frame,
+    mode,
+    selection_mode,
+    *,
+    selection_metric="f1",
+    recall_floor=None,
+    max_recall_drop=0.05,
+    search=None,
+    fixed_tree_parameters=None,
+):
+    """Choose one nested-validation operating point without test-label access.
+
+    ``precision_at_recall_floor`` uses an explicit absolute floor when supplied.
+    Otherwise its floor is the recall of the ordinary F1-selected candidate
+    minus ``max_recall_drop``. Search-specific calls may fix the tree objective
+    chosen by the shared comparison and calibrate only extraction parameters.
+    """
     subset = frame[(frame.model == mode) & (frame.selection_mode == selection_mode)]
+    if search is not None:
+        subset = subset[subset.search == search]
+    if fixed_tree_parameters:
+        for column in ("contrast_weight", "balance_weight"):
+            if column in fixed_tree_parameters:
+                subset = subset[np.isclose(
+                    subset[column], float(fixed_tree_parameters[column]))]
     if subset.empty:
         raise ValueError(f"no validation candidates for {mode}/{selection_mode}")
     work = (subset.groupby(
         ["work", "search", "contrast_weight", "balance_weight",
-         "candidate_value"], as_index=False)
-        [["precision", "recall", "f1"]].mean())
+         "candidate_value", "min_separation_qb", "local_max_radius_qb"],
+        as_index=False)
+        [["precision", "recall", "f1", "f0.5"]].mean())
     candidates = (work.groupby(
-        ["contrast_weight", "balance_weight", "candidate_value"], as_index=False)
-        [["precision", "recall", "f1"]].mean())
-    candidate_ascending = selection_mode == "fixed_budget"
-    candidates = candidates.sort_values(
-        ["f1", "recall", "precision", "candidate_value",
-         "balance_weight", "contrast_weight"],
-        ascending=[False, False, False, candidate_ascending, True, True],
-        kind="stable")
-    return candidates.iloc[0].to_dict(), candidates
+        ["contrast_weight", "balance_weight", "candidate_value",
+         "min_separation_qb", "local_max_radius_qb"], as_index=False)
+        [["precision", "recall", "f1", "f0.5"]].mean())
+
+    candidates["selection_metric"] = selection_metric
+    candidates["recall_floor"] = np.nan
+    candidates["eligible_for_selection"] = True
+    if selection_metric == "precision_at_recall_floor":
+        if not 0 <= max_recall_drop <= 1:
+            raise ValueError("max_recall_drop must lie in [0,1]")
+        f1_reference = _sort_candidates(candidates, "f1", selection_mode).iloc[0]
+        effective_floor = (
+            float(recall_floor) if recall_floor is not None
+            else max(0.0, float(f1_reference["recall"]) - max_recall_drop)
+        )
+        if not 0 <= effective_floor <= 1:
+            raise ValueError("recall_floor must lie in [0,1]")
+        candidates["recall_floor"] = effective_floor
+        candidates["eligible_for_selection"] = (
+            candidates.recall >= effective_floor - 1e-12)
+        eligible = candidates[candidates.eligible_for_selection].copy()
+        if eligible.empty:
+            raise ValueError(
+                f"recall floor {effective_floor:.4f} is infeasible for "
+                f"{mode}/{selection_mode}")
+        ordered = _sort_candidates(
+            eligible, "precision_at_recall_floor", selection_mode)
+    else:
+        ordered = _sort_candidates(candidates, selection_metric, selection_mode)
+    score_column = "f0.5" if selection_metric == "f0.5" else (
+        "precision" if selection_metric == "precision_at_recall_floor" else "f1")
+    candidates["selection_score"] = candidates[score_column]
+    ordered = ordered.copy()
+    ordered["selection_score"] = ordered[score_column]
+    ordered["selection_metric"] = selection_metric
+    if selection_metric == "precision_at_recall_floor":
+        ordered["recall_floor"] = effective_floor
+    return ordered.iloc[0].to_dict(), candidates
 
 
 def model_parameter_rows(models, outer_work, stage, inner_fold=None):
     rows = []
     for mode, scorer in models.items():
+        calibrator = getattr(scorer, "calibrator", None)
         for index, name in enumerate(scorer.scaler.names):
             rows.append({
                 "outer_work": outer_work, "stage": stage, "inner_fold": inner_fold,
@@ -287,6 +530,18 @@ def model_parameter_rows(models, outer_work, stage, inner_fold=None):
                 "training_mad": float(scorer.scaler.mads[index]),
                 "training_scale": float(scorer.scaler.scales[index]),
                 "intercept": float(scorer.intercept), "gain": float(scorer.gain),
+                "probability_calibration": (
+                    "platt" if calibrator is not None else "none"),
+                "calibration_intercept": (
+                    float(calibrator.intercept) if calibrator else np.nan),
+                "calibration_slope": (
+                    float(calibrator.slope) if calibrator else np.nan),
+                "calibration_score_location": (
+                    float(calibrator.score_location) if calibrator else np.nan),
+                "calibration_score_scale": (
+                    float(calibrator.score_scale) if calibrator else np.nan),
+                "calibration_fit_scope": (
+                    calibrator.fit_scope if calibrator else None),
             })
     return rows
 
@@ -302,11 +557,17 @@ def evaluate_outer(items, models, selections, args, outer_work):
         contrast_by_piece = {
             item["piece"]: contrast_for_item(mode, scorer, item) for item in items
         }
-        for selection_mode in ("threshold", "fixed_budget"):
-            choice = selections[(mode, selection_mode)]
+        selected_configs = [
+            (key, choice) for key, choice in selections.items()
+            if key[0] == mode and key[1] in {"threshold", "fixed_budget"}
+        ]
+        for key, choice in selected_configs:
+            _, selection_mode, calibration_scope, calibrated_search = key
             contrast_weight = float(choice["contrast_weight"])
             balance_weight = float(choice["balance_weight"])
             candidate = float(choice["candidate_value"])
+            min_separation = float(choice.get("min_separation_qb", 0.0))
+            local_max_radius = float(choice.get("local_max_radius_qb", 0.0))
             for item in items:
                 contrast = contrast_by_piece[item["piece"]]
                 cache_key = (item["piece"], mode, contrast_weight, balance_weight)
@@ -338,9 +599,13 @@ def evaluate_outer(items, models, selections, args, outer_work):
                                 "contrast_weight": contrast_weight,
                                 "balance_weight": balance_weight, **boundary,
                             })
+                    if calibrated_search is not None and search != calibrated_search:
+                        continue
                     if selection_mode == "threshold":
                         predicted = collect_salient_splits(
-                            tree, contrast, threshold=candidate)
+                            tree, contrast, threshold=candidate,
+                            min_separation_qb=min_separation,
+                            local_max_radius_qb=local_max_radius)
                     else:
                         predicted = collect_salient_splits(
                             tree, contrast, budget=int(candidate))
@@ -350,10 +615,15 @@ def evaluate_outer(items, models, selections, args, outer_work):
                             "outer_work": outer_work, "piece": item["piece"],
                             "work": item["work"], "model": mode, "search": search,
                             "selection_mode": selection_mode,
+                            "calibration_scope": calibration_scope,
                             "selected_value": candidate,
+                            "min_separation_qb": min_separation,
+                            "local_max_radius_qb": local_max_radius,
+                            "selection_metric": args.selection_metric,
                             "contrast_weight": contrast_weight,
                             "balance_weight": balance_weight,
                             "tolerance_qb": float(tolerance), "oracle": False,
+                            "f0.5": float(f_beta(score["precision"], score["recall"])),
                             **{key: score[key] for key in
                                ["tp", "fp", "fn", "precision", "recall", "f1",
                                 "predicted_boundary_count", "gt_boundary_count",
@@ -361,7 +631,7 @@ def evaluate_outer(items, models, selections, args, outer_work):
                         })
 
         # Oracle count is diagnostic only and uses the fixed-budget-selected tree.
-        choice = selections[(mode, "fixed_budget")]
+        choice = selections[(mode, "fixed_budget", "shared", None)]
         contrast_weight = float(choice["contrast_weight"])
         balance_weight = float(choice["balance_weight"])
         for item in items:
@@ -379,10 +649,15 @@ def evaluate_outer(items, models, selections, args, outer_work):
                         "outer_work": outer_work, "piece": item["piece"],
                         "work": item["work"], "model": mode, "search": search,
                         "selection_mode": "oracle_budget",
+                        "calibration_scope": "oracle",
                         "selected_value": len(item["reference"]),
+                        "min_separation_qb": 0.0,
+                        "local_max_radius_qb": 0.0,
+                        "selection_metric": "oracle",
                         "contrast_weight": contrast_weight,
                         "balance_weight": balance_weight,
                         "tolerance_qb": float(tolerance), "oracle": True,
+                        "f0.5": float(f_beta(score["precision"], score["recall"])),
                         **{key: score[key] for key in
                            ["tp", "fp", "fn", "precision", "recall", "f1",
                             "predicted_boundary_count", "gt_boundary_count",
@@ -395,10 +670,12 @@ def plot_outputs(results, candidates, comparison, output_dir):
     selected = results[~results.oracle].copy()
     if not selected.empty:
         tolerance = selected.groupby(
-            ["model", "search", "selection_mode", "tolerance_qb"],
+            ["model", "search", "selection_mode", "calibration_scope",
+             "tolerance_qb"],
             as_index=False).f1.mean()
         figure, axis = plt.subplots(figsize=(8, 5))
-        for keys, group in tolerance.groupby(["model", "search", "selection_mode"]):
+        for keys, group in tolerance.groupby(
+                ["model", "search", "selection_mode", "calibration_scope"]):
             axis.plot(group.tolerance_qb, group.f1, marker="o",
                       label="/".join(map(str, keys)))
         axis.set(xlabel="Tolerance (quarterbeats)", ylabel="Mean movement F1",
@@ -409,10 +686,12 @@ def plot_outputs(results, candidates, comparison, output_dir):
         plt.close(figure)
 
         pr = selected.groupby(
-            ["model", "search", "selection_mode", "tolerance_qb"],
+            ["model", "search", "selection_mode", "calibration_scope",
+             "tolerance_qb"],
             as_index=False)[["precision", "recall"]].mean()
         figure, axis = plt.subplots(figsize=(7, 5))
-        for keys, group in pr.groupby(["model", "search", "selection_mode"]):
+        for keys, group in pr.groupby(
+                ["model", "search", "selection_mode", "calibration_scope"]):
             axis.plot(group.recall, group.precision, marker="o", linestyle="none",
                       label="/".join(map(str, keys)))
         axis.set(xlabel="Recall", ylabel="Precision",
@@ -432,11 +711,18 @@ def plot_outputs(results, candidates, comparison, output_dir):
         # Hyperparameter curves are inner-validation diagnostics. For each
         # candidate value retain the best lambda within each outer fold.
         subset = (subset.sort_values("f1", ascending=False, kind="stable")
-                  .drop_duplicates(["outer_work", "model", "candidate_value"]))
-        curve = subset.groupby(["model", "candidate_value"], as_index=False).f1.mean()
+                  .drop_duplicates([
+                      "outer_work", "model", "calibration_scope",
+                      "calibrated_search", "candidate_value"]))
+        curve = subset.groupby(
+            ["model", "calibration_scope", "calibrated_search", "candidate_value"],
+            as_index=False, dropna=False).f1.mean()
         figure, axis = plt.subplots(figsize=(7, 4))
-        for model, group in curve.groupby("model"):
-            axis.plot(group.candidate_value, group.f1, marker="o", label=model)
+        for keys, group in curve.groupby(
+                ["model", "calibration_scope", "calibrated_search"],
+                dropna=False):
+            axis.plot(group.candidate_value, group.f1, marker="o",
+                      label="/".join(map(str, keys)))
         axis.set(xlabel=xlabel, ylabel="Inner-validation macro F1",
                  title=f"Selection sensitivity: {xlabel}")
         axis.legend(fontsize=7)
@@ -466,6 +752,8 @@ def main():
         args.lambdas = [0.0, 0.5]
         args.balance_weights = [0.0, 1.0]
         args.thresholds = [0.3, 0.5, 0.7]
+        args.min_separations_qb = [0.0, 16.0]
+        args.local_max_radii_qb = [0.0, 8.0]
         args.boundary_budgets = [5, 10]
         args.tolerances = [args.selection_tolerance]
         args.inner_folds = 2
@@ -474,6 +762,23 @@ def main():
         raise SystemExit("lambdas and thresholds must lie in [0,1]")
     if any(value < 0 for value in args.balance_weights):
         raise SystemExit("balance weights must be non-negative")
+    if any(value < 0 or not np.isfinite(value)
+           for value in args.min_separations_qb + args.local_max_radii_qb):
+        raise SystemExit("NMS separations and local-max radii must be non-negative")
+    if args.recall_floor is not None and not 0 <= args.recall_floor <= 1:
+        raise SystemExit("recall floor must lie in [0,1]")
+    if not 0 <= args.max_recall_drop <= 1:
+        raise SystemExit("max recall drop must lie in [0,1]")
+    if (not np.isfinite(args.selection_tolerance)
+            or args.selection_tolerance < 0):
+        raise SystemExit("selection tolerance must be finite and non-negative")
+    if args.ignore_tolerance_qb is None:
+        args.ignore_tolerance_qb = float(args.selection_tolerance)
+    elif (not np.isfinite(args.ignore_tolerance_qb)
+          or args.ignore_tolerance_qb < 0):
+        raise SystemExit("ignore tolerance must be finite and non-negative")
+    if args.ignore_tolerance_qb > args.selection_tolerance:
+        raise SystemExit("ignore tolerance must not exceed selection tolerance")
     if args.selection_tolerance not in args.tolerances:
         args.tolerances = sorted(set(args.tolerances + [args.selection_tolerance]))
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -560,26 +865,69 @@ def main():
         selections = {}
         for mode in MODEL_MODES:
             for selection_mode in ("threshold", "fixed_budget"):
-                chosen, candidates = select_candidate(
-                    inner_frame, mode, selection_mode)
-                selections[(mode, selection_mode)] = chosen
-                candidates.insert(0, "selection_mode", selection_mode)
-                candidates.insert(0, "model", mode)
-                candidates.insert(0, "outer_work", outer_work)
-                candidates["chosen"] = (
-                    np.isclose(candidates.contrast_weight, chosen["contrast_weight"])
-                    & np.isclose(candidates.balance_weight, chosen["balance_weight"])
-                    & np.isclose(candidates.candidate_value, chosen["candidate_value"]))
-                candidate_summary_all.extend(candidates.to_dict("records"))
-                selection_rows.append({
-                    "outer_work": outer_work, "model": mode,
-                    "selection_mode": selection_mode,
-                    "selected_contrast_weight": chosen["contrast_weight"],
-                    "selected_balance_weight": chosen["balance_weight"],
-                    "selected_value": chosen["candidate_value"],
-                    "inner_f1": chosen["f1"], "inner_recall": chosen["recall"],
-                    "inner_precision": chosen["precision"],
-                })
+                shared_choice, shared_candidates = select_candidate(
+                    inner_frame, mode, selection_mode,
+                    selection_metric=args.selection_metric,
+                    recall_floor=args.recall_floor,
+                    max_recall_drop=args.max_recall_drop)
+                selection_variants = [
+                    ("shared", None, shared_choice, shared_candidates)
+                ]
+                if (selection_mode == "threshold"
+                        and args.threshold_calibration == "both"):
+                    fixed_tree = {
+                        "contrast_weight": shared_choice["contrast_weight"],
+                        "balance_weight": shared_choice["balance_weight"],
+                    }
+                    for search in ("greedy", "dp"):
+                        choice, candidates = select_candidate(
+                            inner_frame, mode, selection_mode,
+                            selection_metric=args.selection_metric,
+                            recall_floor=args.recall_floor,
+                            max_recall_drop=args.max_recall_drop,
+                            search=search,
+                            fixed_tree_parameters=fixed_tree)
+                        selection_variants.append(
+                            ("search_specific", search, choice, candidates))
+
+                for scope, calibrated_search, chosen, candidates in selection_variants:
+                    selections[(mode, selection_mode, scope, calibrated_search)] = chosen
+                    candidates = candidates.copy()
+                    candidates.insert(0, "calibrated_search", calibrated_search)
+                    candidates.insert(0, "calibration_scope", scope)
+                    candidates.insert(0, "selection_mode", selection_mode)
+                    candidates.insert(0, "model", mode)
+                    candidates.insert(0, "outer_work", outer_work)
+                    candidates["chosen"] = (
+                        np.isclose(candidates.contrast_weight,
+                                   chosen["contrast_weight"])
+                        & np.isclose(candidates.balance_weight,
+                                     chosen["balance_weight"])
+                        & np.isclose(candidates.candidate_value,
+                                     chosen["candidate_value"])
+                        & np.isclose(candidates.min_separation_qb,
+                                     chosen["min_separation_qb"])
+                        & np.isclose(candidates.local_max_radius_qb,
+                                     chosen["local_max_radius_qb"]))
+                    candidate_summary_all.extend(candidates.to_dict("records"))
+                    selection_rows.append({
+                        "outer_work": outer_work, "model": mode,
+                        "selection_mode": selection_mode,
+                        "calibration_scope": scope,
+                        "calibrated_search": calibrated_search,
+                        "selection_metric": args.selection_metric,
+                        "selection_score": chosen["selection_score"],
+                        "recall_floor": chosen.get("recall_floor", np.nan),
+                        "selected_contrast_weight": chosen["contrast_weight"],
+                        "selected_balance_weight": chosen["balance_weight"],
+                        "selected_value": chosen["candidate_value"],
+                        "selected_min_separation_qb": chosen["min_separation_qb"],
+                        "selected_local_max_radius_qb": chosen["local_max_radius_qb"],
+                        "inner_f0.5": chosen["f0.5"],
+                        "inner_f1": chosen["f1"],
+                        "inner_recall": chosen["recall"],
+                        "inner_precision": chosen["precision"],
+                    })
 
         outer_train = items_for_works(cache, train_works)
         refit_models, audit, history = fit_contrast_models(outer_train, args)
@@ -633,15 +981,22 @@ def main():
         args.output_dir / "boundary_salience.csv", index=False)
 
     group_columns = [
-        "model", "search", "selection_mode", "tolerance_qb", "oracle"]
+        "model", "search", "selection_mode", "calibration_scope",
+        "tolerance_qb", "oracle"]
     work_results = (results.groupby(["work"] + group_columns, as_index=False)
-                    [["tp", "fp", "fn", "precision", "recall", "f1"]].mean())
+                    [["tp", "fp", "fn", "precision", "recall", "f1",
+                      "f0.5"]].mean())
     work_results.to_csv(args.output_dir / "held_out_per_work.csv", index=False)
     bootstrap_summary(
         work_results, group_columns, samples=2000, seed=args.seed).to_csv(
             args.output_dir / "work_macro_summary.csv", index=False)
-    micro_summary(results, group_columns).to_csv(
-        args.output_dir / "micro_summary.csv", index=False)
+    bootstrap_summary(
+        work_results, group_columns, value="f0.5", samples=2000,
+        seed=args.seed).to_csv(
+            args.output_dir / "work_macro_f0_5_summary.csv", index=False)
+    micro = micro_summary(results, group_columns)
+    micro["f0.5"] = f_beta(micro.precision, micro.recall)
+    micro.to_csv(args.output_dir / "micro_summary.csv", index=False)
 
     comparison = diagnostics.pivot_table(
         index=["outer_work", "piece", "work", "model",
@@ -658,18 +1013,43 @@ def main():
     primary = work_results[
         (~work_results.oracle)
         & work_results.selection_mode.eq("threshold")
+        & work_results.calibration_scope.eq("shared")
         & np.isclose(work_results.tolerance_qb, args.selection_tolerance)
     ].copy()
-    primary["method"] = primary.model + "_" + primary.search
+    primary["method"] = (
+        primary.model + "_" + primary.search + "_" + primary.calibration_scope)
     paired_permutation_tests(
         primary[["work", "method", "f1"]], samples=10000,
         seed=args.seed, unit_column="work").to_csv(
             args.output_dir / "primary_paired_tests.csv", index=False)
+    exploratory = work_results[
+        (~work_results.oracle)
+        & work_results.selection_mode.eq("threshold")
+        & work_results.calibration_scope.eq("search_specific")
+        & np.isclose(work_results.tolerance_qb, args.selection_tolerance)
+    ].copy()
+    if not exploratory.empty:
+        exploratory["method"] = exploratory.model + "_" + exploratory.search
+        paired_permutation_tests(
+            exploratory[["work", "method", "f1"]], samples=10000,
+            seed=args.seed, unit_column="work").to_csv(
+                args.output_dir / "exploratory_search_specific_paired_tests.csv",
+                index=False)
     plot_outputs(results, candidate_frame, comparison, args.output_dir)
 
     metadata = {
         "primary_metric": "work-level macro DCML local-key Boundary F1",
-        "primary_selection": "nested-validation salience threshold",
+        "primary_calibration_scope": "shared",
+        "selection_metric": args.selection_metric,
+        "primary_selection": (
+            "nested-validation salience threshold; selection metric is configurable, "
+            "but held-out F1 remains the primary reported metric"),
+        "threshold_calibration": args.threshold_calibration,
+        "precision_selection_semantics": (
+            "precision_at_recall_floor uses --recall-floor when supplied; otherwise "
+            "the floor is validation F1-selected recall minus --max-recall-drop"),
+        "recall_floor": args.recall_floor,
+        "max_recall_drop": args.max_recall_drop,
         "fair_comparison": "nested-validation fixed boundary budget",
         "objective": (
             "(1-lambda)*normalized ordered affinity revenue + "
@@ -696,9 +1076,20 @@ def main():
         "contexts": args.contexts, "lambdas": args.lambdas,
         "balance_weights": args.balance_weights,
         "thresholds": args.thresholds,
+        "min_separations_qb": args.min_separations_qb,
+        "local_max_radii_qb": args.local_max_radii_qb,
+        "fixed_budget_peak_nms": "disabled to preserve equal predicted counts",
         "boundary_budgets": args.boundary_budgets,
         "tolerances_qb": args.tolerances,
         "selection_tolerance_qb": args.selection_tolerance,
+        "supervised_ignore_tolerance_qb": args.ignore_tolerance_qb,
+        "probability_calibration": args.probability_calibration,
+        "probability_calibration_fit_scope": (
+            "current training works only: inner_train for each fold and "
+            "outer_train for final refit; never validation or outer-test labels"),
+        "probability_calibration_sampling": (
+            "all non-ignored candidates, equal total weight per work, natural "
+            "positive prevalence retained within each work"),
         "outer_works": outer_works, "inner_folds": args.inner_folds,
         "random_seed": args.seed, "test_used_for_selection": False,
         "successful_movements": int(sum(
@@ -714,9 +1105,12 @@ def main():
     summary = work_results[
         (~work_results.oracle)
         & np.isclose(work_results.tolerance_qb, args.selection_tolerance)
-    ].groupby(["model", "search", "selection_mode"], as_index=False).agg(
+    ].groupby(
+        ["model", "search", "selection_mode", "calibration_scope"],
+        as_index=False).agg(
         works=("work", "nunique"), precision=("precision", "mean"),
-        recall=("recall", "mean"), f1=("f1", "mean"), std_f1=("f1", "std"))
+        recall=("recall", "mean"), f0_5=("f0.5", "mean"),
+        f1=("f1", "mean"), std_f1=("f1", "std"))
     print(summary.to_string(index=False, float_format=lambda value: f"{value:.4f}"))
 
 

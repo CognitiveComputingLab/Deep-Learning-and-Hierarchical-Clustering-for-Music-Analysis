@@ -98,6 +98,7 @@ def pairwise_affinity(
     *,
     scale: float | None = None,
     context_radius: int = 0,
+    representation_context_radius: int = 0,
 ) -> tuple[np.ndarray, dict[str, float | int | str]]:
     """Convert a project ``DistanceSpec`` into a calibrated RBF affinity.
 
@@ -111,10 +112,19 @@ def pairwise_affinity(
     matrix = np.asarray(matrix, dtype=float)
     if matrix.ndim != 2 or len(matrix) < 1:
         raise ValueError("matrix must be a non-empty 2-D array")
+    representation_radius = int(representation_context_radius)
+    if representation_radius < 0:
+        raise ValueError("representation_context_radius must be non-negative")
+    contextual_transform = getattr(
+        distance_spec, "transform_contextual_bins", None)
     transform = getattr(distance_spec, "transform_batch", None)
-    if transform is None:
+    if contextual_transform is not None:
+        representation = np.asarray(
+            contextual_transform(matrix, representation_radius), dtype=float)
+    elif transform is not None:
+        representation = np.asarray(transform(matrix), dtype=float)
+    else:
         raise TypeError("distance_spec must provide transform_batch()")
-    representation = np.asarray(transform(matrix), dtype=float)
     if representation.ndim != 2 or len(representation) != len(matrix):
         raise ValueError("transform_batch must return one vector per bin")
     differences = representation[:, None, :] - representation[None, :, :]
@@ -154,6 +164,7 @@ def pairwise_affinity(
         "scale": scale,
         "scale_source": "within_piece_nonzero_median" if estimated else "provided_training_scale",
         "context_radius": radius,
+        "representation_context_radius": representation_radius,
     }
 
 

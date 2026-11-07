@@ -183,11 +183,13 @@ def main():
     pd.DataFrame(status).to_csv(args.output_dir/'run_status.csv',index=False)
     pd.DataFrame(key_rows).to_csv(args.output_dir/'estimated_global_keys.csv',index=False)
     if boundary.empty: raise SystemExit('All pieces failed; inspect run_status.csv.')
+    groups=['method','bin_size_qb','tolerance_qb','depth']
+    boundary['work']=boundary.piece.str.rsplit('_',n=1).str[0]
+    # Persist work before writing per-piece rows; the final evidence audit
+    # aggregates these rows at the complete work/quartet level.
     boundary.to_csv(args.output_dir/'boundary_per_piece.csv',index=False)
     budget_frame.to_csv(args.output_dir/'boundary_fixed_budget_per_piece.csv',index=False)
     ted_frame.to_csv(args.output_dir/'ted_auxiliary_per_piece.csv',index=False)
-    groups=['method','bin_size_qb','tolerance_qb','depth']
-    boundary['work']=boundary.piece.str.rsplit('_',n=1).str[0]
     work_boundary=boundary.groupby(['work']+groups,as_index=False)[
         ['precision','recall','f1','mean_match_error_qb']].mean()
     work_macro=bootstrap_summary(work_boundary,groups,samples=2000,seed=args.seed)

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/music-structure/shared-annotation-v1.schema.json",
+  "title": "Shared music-structure annotation",
+  "type": "object",
+  "required": [
+    "schema_version", "dataset", "piece_id", "work_id",
+    "coordinate_system", "annotations", "layer_definitions"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "dataset": {"type": "string", "minLength": 1},
+    "piece_id": {"type": "string", "minLength": 1},
+    "work_id": {"type": "string", "minLength": 1},
+    "coordinate_system": {"enum": ["quarterbeat", "measure_beat", "mixed"]},
+    "duration_qb": {"type": ["number", "null"], "exclusiveMinimum": 0},
+    "final_measure": {"type": ["integer", "null"]},
+    "final_beat": {"type": ["number", "null"]},
+    "score_path": {"type": ["string", "null"]},
+    "annotation_path": {"type": ["string", "null"]},
+    "layer_definitions": {"type": "object"},
+    "provenance": {"type": "object"},
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "annotations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["annotation_id", "kind", "layer", "label", "source"],
+        "properties": {
+          "annotation_id": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["hierarchical_segment", "partition_segment", "span", "point"]},
+          "layer": {"type": "string", "minLength": 1},
+          "label": {"type": "string"},
+          "start_qb": {"type": ["number", "null"]},
+          "end_qb": {"type": ["number", "null"]},
+          "start_measure": {"type": ["integer", "null"]},
+          "start_beat": {"type": ["number", "null"]},
+          "end_measure": {"type": ["integer", "null"]},
+          "end_beat": {"type": ["number", "null"]},
+          "level": {"type": ["integer", "null"], "minimum": 0},
+          "parent_id": {"type": ["string", "null"]},
+          "tree_id": {"type": ["string", "null"]},
+          "staff": {"type": ["string", "null"]},
+          "source_type": {"type": ["string", "null"]},
+          "source": {"type": "object"}
+        },
+        "additionalProperties": false,
+        "anyOf": [
+          {"required": ["start_qb"]},
+          {"required": ["start_measure", "start_beat"]}
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}

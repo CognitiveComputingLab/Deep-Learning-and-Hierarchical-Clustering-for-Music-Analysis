@@ -1,9 +1,18 @@
-[submodule "external/Taking-Form"]
-	path = external/Taking-Form
-	url = https://github.com/MarkGotham/Taking-Form.git
 [submodule "external/ABC"]
 	path = external/ABC
 	url = https://github.com/DCMLab/ABC.git
+[submodule "external/Taking-Form"]
+	path = external/Taking-Form
+	url = https://github.com/MarkGotham/Taking-Form.git
 [submodule "external/algomus-data"]
 	path = external/algomus-data
 	url = https://gitlab.com/algomus.fr/algomus-data.git
+[submodule "external/schubert_winterreise"]
+	path = external/schubert_winterreise
+	url = https://github.com/DCMLab/schubert_winterreise.git
+[submodule "external/beethoven_piano_sonatas"]
+	path = external/beethoven_piano_sonatas
+	url = https://github.com/DCMLab/beethoven_piano_sonatas.git
+[submodule "external/mozart_piano_sonatas"]
+	path = external/mozart_piano_sonatas
+	url = https://github.com/DCMLab/mozart_piano_sonatas.git

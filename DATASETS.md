@@ -37,7 +37,7 @@ Then pass that MIDI and the compatible notes TSV to a DP visualization script.
 Exported MIDI timing must be checked against the TSV total duration, especially
 for repeats and alternative endings.
 
-## Usable after conversion or pairing
+## Visualization dependency
 
 ### Pitchscapes repository examples
 
@@ -50,28 +50,11 @@ and bounds interface as load_pc_bins. They have no paired DCML local-key
 annotations, so objective/tree visualization is possible but Boundary F1 is
 not.
 
-### Algomus data
-
-The folder contains 60 Dezrann .dez annotation files and 20 MIDI files. The
-MIDI files are AI-song melody examples and are not paired with the classical
-.dez analyses. MIDI can be converted to notes TSV for clustering; .dez needs a
-dedicated parser and a matching symbolic score before it can serve as reference
-annotation. Do not treat unrelated MIDI and .dez files as a test pair.
-
-### Taking Form
-
-Taking Form contains 120 genuine hierarchical-form CSV annotations: 103
-Beethoven sonata movements and 17 Mozart first movements. Its rows encode
-measure, beat, and hierarchy columns from large to small units. This is a
-promising future hierarchical ground truth, but it is not directly compatible
-with the quarterbeat-based DP pipeline and the local checkout does not include
-matching score files.
-
-Integration requires a matching MusicXML/MuseScore/MIDI score, expansion of
-repeats, conversion of measure+beat locations to absolute quarterbeats, and
-construction of contiguous labelled interval trees from the hierarchy columns.
-Evaluate these trees in a separate hierarchical experiment rather than mixing
-them with DCML local-key Boundary F1.
+Taking Form and Algomus are retained as separate, versioned structural
+annotation sources. They are converted with
+`scripts/convert_shared_datasets.py`, but are not silently mixed into the
+70-movement ABC result table. See `SHARED_DATASETS.md` for the 269-piece
+conversion audit, annotation semantics, and missing score-alignment blockers.
 
 ## Conversion checks
 
