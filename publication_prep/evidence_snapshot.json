@@ -1,0 +1,405 @@
+{
+  "code_revision_at_snapshot": "b053bf98ea08298f2438c2322a06c85e1e52d31e",
+  "abc": {
+    "n_movements": 70,
+    "n_works": 16,
+    "primary_seed": 20260818,
+    "primary": [
+      {
+        "family": "diagonal_mahalanobis",
+        "search": "dp",
+        "precision": 0.3607939328741,
+        "recall": 0.6857801007695793,
+        "f1": 0.4457991013745652,
+        "n_works": 16
+      },
+      {
+        "family": "diagonal_mahalanobis",
+        "search": "greedy",
+        "precision": 0.3756230953060929,
+        "recall": 0.6838714014409745,
+        "f1": 0.4554496637436991,
+        "n_works": 16
+      },
+      {
+        "family": "handcrafted_key_profile",
+        "search": "dp",
+        "precision": 0.4459841385283241,
+        "recall": 0.6352544655976835,
+        "f1": 0.4872940362507588,
+        "n_works": 16
+      },
+      {
+        "family": "handcrafted_key_profile",
+        "search": "greedy",
+        "precision": 0.4755232127178036,
+        "recall": 0.5717577458583063,
+        "f1": 0.4883328785797038,
+        "n_works": 16
+      },
+      {
+        "family": "neural_circular_siamese",
+        "search": "dp",
+        "precision": 0.5239917820896767,
+        "recall": 0.6535829426384456,
+        "f1": 0.5307068667394256,
+        "n_works": 16
+      },
+      {
+        "family": "neural_circular_siamese",
+        "search": "greedy",
+        "precision": 0.506878017257388,
+        "recall": 0.6335099853038023,
+        "f1": 0.5147774662886843,
+        "n_works": 16
+      }
+    ],
+    "neural_seeds": [
+      {
+        "seed": 20260818,
+        "search": "dp",
+        "n_works": 16,
+        "work_macro_f1": 0.5307068667394257
+      },
+      {
+        "seed": 20260818,
+        "search": "greedy",
+        "n_works": 16,
+        "work_macro_f1": 0.5147774662886841
+      },
+      {
+        "seed": 20260819,
+        "search": "dp",
+        "n_works": 16,
+        "work_macro_f1": 0.5316242468624357
+      },
+      {
+        "seed": 20260819,
+        "search": "greedy",
+        "n_works": 16,
+        "work_macro_f1": 0.5369458551974712
+      },
+      {
+        "seed": 20260820,
+        "search": "dp",
+        "n_works": 16,
+        "work_macro_f1": 0.514550351024719
+      },
+      {
+        "seed": 20260820,
+        "search": "greedy",
+        "n_works": 16,
+        "work_macro_f1": 0.5262436508249608
+      }
+    ],
+    "neural_dp_minus_key_profile_dp_f1": 0.0434128304886668,
+    "paired_p_unadjusted": 0.0376962303769623,
+    "paired_p_holm": 0.2261773822617738
+  },
+  "taking_form_alignment": {
+    "requested": 120,
+    "aligned": 89,
+    "missing_score": 12,
+    "failed": 19,
+    "pitch_clustering_ready": 89,
+    "warning": "File-name and coordinate alignment is necessary but not sufficient: edition and repeat semantics must be treated as validity checks."
+  },
+  "taking_form_fixed_key_profile": [
+    {
+      "test_corpus": "mozart",
+      "representation": "key_profile",
+      "objective": "additive merge-distance cost; lower is better",
+      "search": "greedy",
+      "n_pieces": 17,
+      "n_works": 17,
+      "t_measure_full": {
+        "mean": 0.6430360207701802,
+        "ci95_low": 0.6015753709800192,
+        "ci95_high": 0.6832472199651424
+      },
+      "t_measure_reduced": {
+        "mean": 0.5001793620867713,
+        "ci95_low": 0.4443726292995585,
+        "ci95_high": 0.5537410766887472
+      },
+      "dp_cost_better_or_equal_pieces": 17,
+      "dp_full_t_worse_pieces": 13,
+      "paired_dp_minus_greedy_full_t": -0.0508108201531877,
+      "paired_p_holm": 0.0523947605239476,
+      "equal_budget_f1": {
+        "1": 0.1274509803921568,
+        "3": 0.573662155802496
+      }
+    },
+    {
+      "test_corpus": "mozart",
+      "representation": "key_profile",
+      "objective": "additive merge-distance cost; lower is better",
+      "search": "dp",
+      "n_pieces": 17,
+      "n_works": 17,
+      "t_measure_full": {
+        "mean": 0.5922252006169925,
+        "ci95_low": 0.5609777461542806,
+        "ci95_high": 0.6212085766296207
+      },
+      "t_measure_reduced": {
+        "mean": 0.3995186951958112,
+        "ci95_low": 0.3697582167454999,
+        "ci95_high": 0.4281822921316476
+      },
+      "dp_cost_better_or_equal_pieces": 17,
+      "dp_full_t_worse_pieces": 13,
+      "paired_dp_minus_greedy_full_t": -0.0508108201531877,
+      "paired_p_holm": 0.0523947605239476,
+      "equal_budget_f1": {
+        "1": 0.0784313725490196,
+        "3": 0.5489340242223418
+      }
+    },
+    {
+      "test_corpus": "beethoven",
+      "representation": "key_profile",
+      "objective": "additive merge-distance cost; lower is better",
+      "search": "greedy",
+      "n_pieces": 72,
+      "n_works": 27,
+      "t_measure_full": {
+        "mean": 0.5967575027832004,
+        "ci95_low": 0.574448489670653,
+        "ci95_high": 0.6189646470710937
+      },
+      "t_measure_reduced": {
+        "mean": 0.4352837014361025,
+        "ci95_low": 0.4067153123169017,
+        "ci95_high": 0.4656615324012447
+      },
+      "dp_cost_better_or_equal_pieces": 72,
+      "dp_full_t_worse_pieces": 47,
+      "paired_dp_minus_greedy_full_t": -0.0489324288641829,
+      "paired_p_holm": 0.001999800019998,
+      "equal_budget_f1": {
+        "1": 0.2294410150891632,
+        "3": 0.5435092349922556
+      }
+    },
+    {
+      "test_corpus": "beethoven",
+      "representation": "key_profile",
+      "objective": "additive merge-distance cost; lower is better",
+      "search": "dp",
+      "n_pieces": 72,
+      "n_works": 27,
+      "t_measure_full": {
+        "mean": 0.5478250739190174,
+        "ci95_low": 0.5241623950422157,
+        "ci95_high": 0.5706872405802395
+      },
+      "t_measure_reduced": {
+        "mean": 0.4050424042295187,
+        "ci95_low": 0.3800836874266988,
+        "ci95_high": 0.4306037866709625
+      },
+      "dp_cost_better_or_equal_pieces": 72,
+      "dp_full_t_worse_pieces": 47,
+      "paired_dp_minus_greedy_full_t": -0.0489324288641829,
+      "paired_p_holm": 0.001999800019998,
+      "equal_budget_f1": {
+        "1": 0.1719650205761317,
+        "3": 0.5181279439008338
+      }
+    }
+  ],
+  "taking_form_cross_composer": [
+    {
+      "train_corpus": "beethoven",
+      "test_corpus": "mozart",
+      "representation": "form_supervised_parametric_mixture",
+      "objective": "boundary-aware tree objective; higher is better",
+      "search": "greedy",
+      "n_pieces": 17,
+      "n_works": 17,
+      "t_measure_full": 0.6595872627547971,
+      "t_measure_reduced": 0.4422270259657476,
+      "objective_value": 0.114192659926424,
+      "dp_objective_better_or_equal_pieces": 17,
+      "paired_dp_minus_greedy_full_t": 0.0730463278018368,
+      "paired_p_value_unadjusted": 0.0040995900409959
+    },
+    {
+      "train_corpus": "beethoven",
+      "test_corpus": "mozart",
+      "representation": "form_supervised_parametric_mixture",
+      "objective": "boundary-aware tree objective; higher is better",
+      "search": "dp",
+      "n_pieces": 17,
+      "n_works": 17,
+      "t_measure_full": 0.7326335905566339,
+      "t_measure_reduced": 0.6305341083898578,
+      "objective_value": 0.1547310430830132,
+      "dp_objective_better_or_equal_pieces": 17,
+      "paired_dp_minus_greedy_full_t": 0.0730463278018368,
+      "paired_p_value_unadjusted": 0.0040995900409959
+    },
+    {
+      "train_corpus": "mozart",
+      "test_corpus": "beethoven",
+      "representation": "form_supervised_parametric_mixture",
+      "objective": "boundary-aware tree objective; higher is better",
+      "search": "greedy",
+      "n_pieces": 72,
+      "n_works": 27,
+      "t_measure_full": 0.6054616253992197,
+      "t_measure_reduced": 0.4499049244197731,
+      "objective_value": 0.166349873000431,
+      "dp_objective_better_or_equal_pieces": 72,
+      "paired_dp_minus_greedy_full_t": 0.0211313238820449,
+      "paired_p_value_unadjusted": 0.0791920807919208
+    },
+    {
+      "train_corpus": "mozart",
+      "test_corpus": "beethoven",
+      "representation": "form_supervised_parametric_mixture",
+      "objective": "boundary-aware tree objective; higher is better",
+      "search": "dp",
+      "n_pieces": 72,
+      "n_works": 27,
+      "t_measure_full": 0.6265929492812646,
+      "t_measure_reduced": 0.4769476383608811,
+      "objective_value": 0.2269015706322919,
+      "dp_objective_better_or_equal_pieces": 72,
+      "paired_dp_minus_greedy_full_t": 0.0211313238820449,
+      "paired_p_value_unadjusted": 0.0791920807919208
+    }
+  ],
+  "sources": [
+    {
+      "path": "data/shared_annotations_v1_aligned/summary.json",
+      "sha256": "261f2c56bfdf9afb9aa92faf6d77b6ac7137cb65ed89c56d6b72fe4687a07908"
+    },
+    {
+      "path": "results/dissertation_main/final_evidence/final_audit.json",
+      "sha256": "123e4237a903b8045b9fe62cbba245b28ac3e0bfdf71303f4b76128524dd30c1"
+    },
+    {
+      "path": "results/dissertation_main/final_evidence/three_stage_comparison.csv",
+      "sha256": "2936409f958b33a35d880fb62b46ff5c1d7b4ba9e8134122a7a9096fd284ea00"
+    },
+    {
+      "path": "results/dissertation_main/neural/held_out_per_work.csv",
+      "sha256": "d566d11680ee53961c63682cc434e286a183e302a85bf52fb61f052b43079cb6"
+    },
+    {
+      "path": "results/dissertation_main/neural/metadata.json",
+      "sha256": "e27ab5915aafdb6049b58bf05e8b6116fe292d9048d9e6865d17ae73236baa12"
+    },
+    {
+      "path": "results/dissertation_main/neural/primary_paired_tests.csv",
+      "sha256": "ab809e9dc90a3ad15aeb7933ce1ddfaeadbb0997f1d11f308bda6156f11d3456"
+    },
+    {
+      "path": "results/parametric_hierarchy_beethoven_to_mozart/held_out_per_piece.csv",
+      "sha256": "426448a495583f3224befc5a7d4113e1209df282d373d7d88da475cfbdeb1150"
+    },
+    {
+      "path": "results/parametric_hierarchy_beethoven_to_mozart/held_out_summary.csv",
+      "sha256": "e76092dc8a85b8dea89dc9ccac63f8627fc3359b1b205a5430103844e9675230"
+    },
+    {
+      "path": "results/parametric_hierarchy_beethoven_to_mozart/model_parameters.json",
+      "sha256": "c8e9793803f44ee7bf263169f180a153f9fc94ae2da45c39cbe0254b82830cc3"
+    },
+    {
+      "path": "results/parametric_hierarchy_beethoven_to_mozart/objective_comparison.csv",
+      "sha256": "594cdcf65279481475b16a4c81c386b4f7e7ff9225ea4749d5a786e4d5630f75"
+    },
+    {
+      "path": "results/parametric_hierarchy_beethoven_to_mozart/paired_dp_vs_greedy.csv",
+      "sha256": "d4c26b702759baa303c6ca596d0c6465b659b25cf4e0c4692b2c9781bdc0d82d"
+    },
+    {
+      "path": "results/parametric_hierarchy_beethoven_to_mozart/run_status.csv",
+      "sha256": "a64926286e9960019462c6553b049f9cbd31cece155a540e5002af6634d26787"
+    },
+    {
+      "path": "results/parametric_hierarchy_mozart_to_beethoven/held_out_per_piece.csv",
+      "sha256": "72fdff49988e610c9c7b074450f2b17a3bdfb428456a319710902f6939b5602e"
+    },
+    {
+      "path": "results/parametric_hierarchy_mozart_to_beethoven/held_out_summary.csv",
+      "sha256": "ddaae76bd0be77bbc67b6c768e99751ff214a935d3145d94ebca7208ac86f75b"
+    },
+    {
+      "path": "results/parametric_hierarchy_mozart_to_beethoven/model_parameters.json",
+      "sha256": "a5682b07a9f0102ccee359566cb13dfe46ceafcd6e6a2c937913a28713175afa"
+    },
+    {
+      "path": "results/parametric_hierarchy_mozart_to_beethoven/objective_comparison.csv",
+      "sha256": "6e668111b512ee0d803f28ba181dff589bf881f79edcee59f11b8528d3fadf93"
+    },
+    {
+      "path": "results/parametric_hierarchy_mozart_to_beethoven/paired_dp_vs_greedy.csv",
+      "sha256": "2f166a42499c32ac8765aa96e40e9fc4c0a6ca258d5a461009694d21642635b5"
+    },
+    {
+      "path": "results/parametric_hierarchy_mozart_to_beethoven/run_status.csv",
+      "sha256": "12ea0c4197f55855ef20c340220dd7fff6625ea2c0fe00948752715a4f6614af"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_beethoven_tree/dp_vs_greedy_tree_tests.csv",
+      "sha256": "2027e80a8fd4295f32e26a2cfd617be3be9d1a5ea82d32fd370f61d6801b1964"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_beethoven_tree/equal_budget_summary.csv",
+      "sha256": "c1c00a45f4d4039b072ea5ca8eb5db10250f0bcde3018afb106535b34b0bbe25"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_beethoven_tree/metadata.json",
+      "sha256": "f2106ea143fbd083936ac952aee172005328c9273fab2a6da94c3add7d13d8da"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_beethoven_tree/run_status.csv",
+      "sha256": "68133de28eaa55c32d38541abcec770cf371d495b4d42414a98e1739bd268be8"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_beethoven_tree/tree_measure_bootstrap.csv",
+      "sha256": "7a214bfaff4d7c304ff22d74cba106fcd5671f2c0cb531ea48b1e880fc38fb2e"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_beethoven_tree/tree_measure_per_piece.csv",
+      "sha256": "e80a258a6719f5816dd926dd956c9edfbe5c7988c83f782f50ee7aeca5c167d1"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_beethoven_tree/tree_measure_summary.csv",
+      "sha256": "62dd6c03dda105b607a59e61a732be9401c819f07ac536714e9cf0a615c7abd5"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_mozart_tree/dp_vs_greedy_tree_tests.csv",
+      "sha256": "019fb2c7791f1868ba15a5e22fccc514e488a0d5afbe8b3be090a1012d10156c"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_mozart_tree/equal_budget_summary.csv",
+      "sha256": "e138445fff0dfa5816bacc229795f1762d6ab752858e60854e4c83f4a7f3e6b5"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_mozart_tree/metadata.json",
+      "sha256": "cb31e50ab9c601ccf8286ac8eb4a7f6e7733f2eb195fabbfe38e0af8f4dc7dad"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_mozart_tree/run_status.csv",
+      "sha256": "2edb29d8ad43c9e9f51abb1cea75e0de39ab82b5cbb1f099234d8fb1019fab93"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_mozart_tree/tree_measure_bootstrap.csv",
+      "sha256": "fc454b8efbae6fa43bd5f579e24e86070c244f3b8a5ff7e8d6075a91480746a4"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_mozart_tree/tree_measure_per_piece.csv",
+      "sha256": "eff05773be4c5cddf6f9405218efe88c8c5934448b5675dcce82d1b3bc04f5b7"
+    },
+    {
+      "path": "results/shared_hierarchy_stage_mozart_tree/tree_measure_summary.csv",
+      "sha256": "66cf806ca72877aaaf5dc2cd968e958e86ebbe7ad3093d989d8beeb59435d231"
+    }
+  ]
+}
