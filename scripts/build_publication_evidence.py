@@ -200,8 +200,13 @@ def build(root: Path) -> dict:
             })
 
     try:
+        # Documentation-only commits do not change the audited method code.
         revision = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
+            ["git", "log", "-1", "--format=%H", "--",
+             "src/ordered_affinity.py", "src/neural_distance.py",
+             "src/greedy_evaluation.py", "src/hierarchical_evaluation.py",
+             "scripts/evaluate_neural_distance_stage.py"],
+            cwd=root, text=True).strip()
     except (OSError, subprocess.CalledProcessError):
         revision = None
     return {
